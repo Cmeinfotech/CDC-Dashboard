@@ -1,0 +1,4 @@
+export const numberValue=(value:unknown)=>{if(typeof value==="number")return Number.isFinite(value)?value:0;const n=Number(String(value??"").replace(/[$,% ,]/g,""));return Number.isFinite(n)?n:0;};
+export const textValue=(value:unknown)=>String(value??"").trim();
+export function monthValue(value:unknown){if(value instanceof Date&&!isNaN(value.getTime()))return value.toISOString().slice(0,7);if(typeof value==="number"){const epoch=new Date(Date.UTC(1899,11,30));epoch.setUTCDate(epoch.getUTCDate()+value);return epoch.toISOString().slice(0,7);}const text=textValue(value);const parsed=new Date(text);if(!isNaN(parsed.getTime()))return parsed.toISOString().slice(0,7);const match=text.match(/(\d{4})[-/]?(\d{1,2})/);return match?`${match[1]}-${match[2].padStart(2,"0")}`:text||"Unknown";}
+export const normalizeTitle=(value:unknown)=>textValue(value).toLowerCase().replace(/[^a-z0-9]+/g," ").trim();

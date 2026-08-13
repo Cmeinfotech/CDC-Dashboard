@@ -1,0 +1,3 @@
+import { mapHeaders } from "./headerMapping";
+export type ReportType="business"|"catalog"|"unknown";
+export function detectReportType(headers:unknown[]){const mapped=mapHeaders(headers);const business=["parentAsin","childAsin","sales","units","orders"].filter(k=>mapped[k as keyof typeof mapped]).length;const catalog=["sku","childAsin","relationship","parentSku","title"].filter(k=>mapped[k as keyof typeof mapped]).length;const type:ReportType=business>=4?"business":catalog>=3?"catalog":"unknown";return{type,mapped,confidence:type==="unknown"?0:Math.min(100,(type==="business"?business/5:catalog/5)*100)};}
