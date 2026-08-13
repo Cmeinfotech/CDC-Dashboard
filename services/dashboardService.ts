@@ -1,28 +1,15 @@
 import { asinChanges, dailySales, monthlySales, products, uploadHistory } from "../mocks/dashboardData";
 
-const wait = (ms = 420) => new Promise((resolve) => setTimeout(resolve, ms));
-
-export async function getDashboardData() {
-  await wait();
-  return { products, monthlySales, dailySales };
-}
-
-export async function getTrackingData() {
-  await wait(300);
-  return { products, asinChanges };
-}
-
-export async function getUploadHistory() {
-  await wait(280);
-  return uploadHistory;
-}
-
-export async function simulateUpload(fileName: string) {
-  await wait(1100);
-  return { file: fileName, rows: 3124, valid: 3118, warnings: 6, changes: 1 };
-}
-
-export async function mergeAsinChange(id: string) {
-  await wait(650);
-  return { id, mergedAt: new Date().toISOString(), preservedHistory: true };
-}
+const wait = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms));
+const STORAGE_KEY = "cdc-sales-demo-state-v1";
+type DemoState = { monthlySales: typeof monthlySales; dailySales: typeof dailySales; asinChanges: typeof asinChanges; uploadHistory: typeof uploadHistory };
+const defaults = (): DemoState => ({ monthlySales: structuredClone(monthlySales), dailySales: structuredClone(dailySales), asinChanges: structuredClone(asinChanges), uploadHistory: structuredClone(uploadHistory) });
+function readState(): DemoState { if (typeof window === "undefined") return defaults(); try { const stored=window.localStorage.getItem(STORAGE_KEY); return stored ? {...defaults(),...JSON.parse(stored)} : defaults(); } catch { return defaults(); } }
+function writeState(state:DemoState){ if(typeof window!=="undefined"){window.localStorage.setItem(STORAGE_KEY,JSON.stringify(state));window.dispatchEvent(new CustomEvent("cdc-data-updated"));} }
+export async function getDashboardData(){await wait();const s=readState();return{products,monthlySales:s.monthlySales,dailySales:s.dailySales};}
+export async function getTrackingData(){await wait(180);return{products,asinChanges:readState().asinChanges};}
+export async function getUploadHistory(){await wait(160);return readState().uploadHistory;}
+function parseCsv(text:string){const lines=text.trim().split(/\r?\n/).filter(Boolean);if(lines.length<2)return null;const headers=lines[0].split(",").map(h=>h.trim().replace(/^"|"$/g,"").toLowerCase());const revenueIndex=headers.findIndex(h=>/revenue|sales|amount/.test(h));const asinIndex=headers.findIndex(h=>h==="asin"||h.includes("child asin"));const rows=lines.slice(1).map(line=>line.split(",").map(v=>v.trim().replace(/^"|"$/g,"")));const revenue=revenueIndex>=0?rows.reduce((sum,row)=>sum+(Number(row[revenueIndex]?.replace(/[$,]/g,""))||0),0):0;return{rows:rows.length,revenue,hasRevenue:revenueIndex>=0,hasAsin:asinIndex>=0};}
+export async function simulateUpload(file:File){await wait(850);let parsed:ReturnType<typeof parseCsv>=null;if(file.name.toLowerCase().endsWith(".csv"))parsed=parseCsv(await file.text());const state=readState();const rows=parsed?.rows||3124;const warnings=parsed?Number(!parsed.hasRevenue)+Number(!parsed.hasAsin):6;const revenue=parsed?.revenue||18450;const latest={...state.monthlySales[state.monthlySales.length-1]} as Record<string,string|number>;latest["P-1001"]=Number(latest["P-1001"])+Math.round(revenue);state.monthlySales[state.monthlySales.length-1]=latest as (typeof monthlySales)[number];const item={file:file.name,rows,date:"Just now",status:"Validated",changes:1};state.uploadHistory=[item,...state.uploadHistory].slice(0,12);writeState(state);return{...item,valid:Math.max(0,rows-warnings),warnings,revenue};}
+export async function mergeAsinChange(id:string){await wait(450);const state=readState();state.asinChanges=state.asinChanges.map(c=>c.id===id?{...c,status:"Merged"}:c);writeState(state);return{id,mergedAt:new Date().toISOString(),preservedHistory:true};}
+export async function resetDemoData(){await wait(150);if(typeof window!=="undefined"){window.localStorage.removeItem(STORAGE_KEY);window.dispatchEvent(new CustomEvent("cdc-data-updated"));}return defaults();}
