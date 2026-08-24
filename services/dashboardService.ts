@@ -1,12 +1,34 @@
-import { asinChanges as mockChanges, dailySales, monthlySales as mockMonthly, products as mockProducts, uploadHistory as mockUploads } from "../mocks/dashboardData";
-import { clearImportedState, getImportedState, setImportedState } from "../store/dashboardDataStore";
-import { importWorkbook } from "./excelImportService";
-const wait=(ms=180)=>new Promise(r=>setTimeout(r,ms));
-function importedModel(){const state=getImportedState();if(!state.salesRecords.length)return null;const parents=[...new Set(state.salesRecords.map(r=>r.parentAsin))];const catalogByAsin=new Map(state.catalogData.map(c=>[c.asin,c]));const products=parents.map((parent,index)=>{const records=state.salesRecords.filter(r=>r.parentAsin===parent);const childIds=[...new Set(records.map(r=>r.childAsin))];const totalsByMonth=new Map<string,number>();records.forEach(r=>totalsByMonth.set(r.month,(totalsByMonth.get(r.month)||0)+r.sales));const vals=[...totalsByMonth.values()];const growth=vals.length>1?(vals.at(-1)!-vals.at(-2)!)/Math.max(vals.at(-2)!,1):0;return{parent,name:records.find(r=>r.title)?.title||parent,category:"Imported",trend:vals.length<2?"stable":growth>.05?"growing":growth<-.05?"declining":"stable",children:childIds.map(asin=>{const c=catalogByAsin.get(asin);return{asin,label:c?[c.color,c.size,c.style].filter(Boolean).join(" · ")||c.title:records.find(r=>r.childAsin===asin)?.title||asin,status:"Active" as const}}),index};});const months=[...new Set(state.salesRecords.map(r=>r.month))].sort();const monthlySales=months.map(month=>{const point:Record<string,string|number>={month};for(const p of products)point[p.parent]=state.salesRecords.filter(r=>r.month===month&&r.parentAsin===p.parent).reduce((s,r)=>s+r.sales,0);return point});const metrics=Object.fromEntries(products.map(p=>{const rows=state.salesRecords.filter(r=>r.parentAsin===p.parent);return[p.parent,{sales:rows.reduce((s,r)=>s+r.sales,0),units:rows.reduce((s,r)=>s+r.units,0),orders:rows.reduce((s,r)=>s+r.orders,0),sessions:rows.reduce((s,r)=>s+r.sessions,0),pageViews:rows.reduce((s,r)=>s+r.pageViews,0)}]}));return{products,monthlySales,dailySales:[],metrics,granularity:"monthly",salesRecords:state.salesRecords};}
-export async function getDashboardData(){await wait();return importedModel()||{products:mockProducts,monthlySales:mockMonthly,dailySales,metrics:null,granularity:"daily",salesRecords:[]};}
-export async function getTrackingData(){await wait();const state=getImportedState();const model=importedModel();return{products:model?.products||mockProducts,asinChanges:state.asinChanges.length?state.asinChanges:mockChanges,asinHistory:state.asinHistory};}
-export async function getUploadHistory(){await wait();const imported=getImportedState().uploadHistory;return imported.length?imported:mockUploads;}
-export async function processExcelUpload(file:File,onProgress?:(step:string,percent:number)=>void){return importWorkbook(file,onProgress);}
-export async function mergeAsinChange(id:string){await wait();const state=getImportedState();const change=state.asinChanges.find(c=>c.id===id);state.asinChanges=state.asinChanges.map(c=>c.id===id?{...c,status:"Merged"}:c);if(change)state.asinHistory.push({product:change.product,currentAsin:change.current,previousAsins:[change.previous],mergedAt:new Date().toISOString()});setImportedState(state);return{id,preservedHistory:true};}
-export async function resetDemoData(){clearImportedState();localStorage.removeItem("cdc-sales-demo-state-v1");return true;}
-export async function exportAnalytics(filters:{scope?:string}={}){const state=getImportedState();const rows=filters.scope&&filters.scope!=="All products"?state.salesRecords.filter(r=>r.parentAsin===filters.scope):state.salesRecords;return rows;}
+type AccountId = "cdc" | "nana-jewellers";
+type ImportDateRange = { startDate?: string; endDate?: string };
+const accountHeaders = (accountId: AccountId) => ({ "x-cdc-account-id": accountId });
+async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "cdc"): Promise<T> {
+  const response = await fetch(url, { ...init, headers: { ...accountHeaders(accountId), ...init?.headers } }); const body = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
+  return body;
+}
+export const getDashboardData = (accountId: AccountId = "cdc") => api<any>("/api/dashboard", undefined, accountId);
+export const getTrackingData = (accountId: AccountId = "cdc") => api<any>("/api/tracking", undefined, accountId);
+export const getUploadHistory = (accountId: AccountId = "cdc") => api<any[]>("/api/uploads", undefined, accountId);
+export async function processExcelUpload(file: File, onProgress?: (step: string, percent: number) => void, accountId: AccountId = "cdc", dateRange?: ImportDateRange) {
+  const form = new FormData(); form.append("file", file); if (dateRange?.startDate) form.append("startDate", dateRange.startDate); if (dateRange?.endDate) form.append("endDate", dateRange.endDate); onProgress?.("Starting upload…", 0);
+  const result = await new Promise<any>((resolve, reject) => {
+    const request = new XMLHttpRequest(); request.open("POST", "/api/uploads"); request.setRequestHeader("x-cdc-account-id", accountId); request.responseType = "json";
+    request.upload.addEventListener("progress", event => {
+      if (!event.lengthComputable) return onProgress?.("Uploading workbook…", 0);
+      const percent = Math.min(99, Math.max(1, Math.round((event.loaded / event.total) * 100)));
+      onProgress?.(`Uploading ${file.name}`, percent);
+    });
+    request.upload.addEventListener("loadend", () => onProgress?.("Upload complete — processing workbook…", 100));
+    request.addEventListener("load", () => {
+      const body = request.response || (() => { try { return JSON.parse(request.responseText); } catch { return {}; } })();
+      if (request.status < 200 || request.status >= 300) return reject(new Error(body?.error || `Request failed (${request.status}).`));
+      resolve(body);
+    });
+    request.addEventListener("error", () => reject(new Error("Network error while uploading workbook.")));
+    request.send(form);
+  });
+  window.dispatchEvent(new CustomEvent("cdc-data-updated")); return result;
+}
+export async function mergeAsinChange(id: string, accountId: AccountId = "cdc") { const result = await api<any>("/api/tracking/merge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) }, accountId); window.dispatchEvent(new CustomEvent("cdc-data-updated")); return result; }
+export async function mergeAllAsinChanges(accountId: AccountId = "cdc") { const result = await api<any>("/api/tracking/merge-all", { method: "POST" }, accountId); window.dispatchEvent(new CustomEvent("cdc-data-updated")); return result; }
+export async function exportAnalytics(accountId: AccountId = "cdc") { const data = await getDashboardData(accountId); return data.salesRecords || []; }

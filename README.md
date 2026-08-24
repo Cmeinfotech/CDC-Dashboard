@@ -16,6 +16,19 @@ npm run dev
 npm run build
 ```
 
+## CDC backend
+
+The dashboard now uses a Cloudflare D1 database (`DB`) instead of browser local storage.
+
+- `POST /api/uploads` validates and imports Product Catalog, Business Report, and Order Excel workbooks.
+- Every successful upload is an immutable snapshot. A new catalog is compared only with the latest previous catalog.
+- Catalog comparison records missing ASINs, replacement ASINs matched by SKU, and field-by-field changes across every supplied catalog column.
+- `GET /api/dashboard`, `GET /api/tracking`, and `GET /api/uploads` power the existing UI.
+- `POST /api/tracking/merge` preserves a confirmed previous-to-current ASIN link in history.
+- Order imports intentionally exclude buyer contact and shipping-address fields.
+
+Generate a migration after schema changes with `npm run db:generate`. The checked-in `drizzle/0000_silky_jocasta.sql` initializes the current schema and must be applied to the deployment's D1 database.
+
 This starter does not use `wrangler.jsonc`.
 
 ## Included Shape
