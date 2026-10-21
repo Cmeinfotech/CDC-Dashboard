@@ -106,6 +106,11 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm run build`: verify the vinext build output
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm run amazon:sync`: manually refresh the Amazon catalog, listings, and Account Health.
+- `npm run amazon:auto-sync:configure`: save the automatic-sync status. On Windows, run `scripts/install-amazon-auto-sync-task.ps1` once to create the daily Task Scheduler job. The worker runs sequentially, preserves the existing encrypted data on a failed pull, and does not run overlapping syncs.
+- `npm run amazon:reset-pull-data`: clear only saved Amazon pull storage. It does not delete dashboard Excel uploads or the application database.
+- `npm run amazon:backfill`: pull two calendar years of Amazon order-report history in 30-day, resumable report batches, then future daily syncs refresh the most recent seven days.
+- `npm run amazon:sync-database`: replace the configured CDC dashboard account’s catalog and order records with the latest encrypted Amazon pull. Daily automation runs this after the Amazon pulls finish.
 
 ## Learn More
 

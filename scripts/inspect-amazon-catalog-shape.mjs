@@ -1,0 +1,10 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { parseEnv } from 'node:util';
+import { readAmazonJson } from '../services/amazonDataSecurity.mjs';
+const env = { ...parseEnv(await fs.readFile('.env', 'utf8')), ...process.env };
+for (const key of ['AMAZON_DATA_KEY', 'AMAZON_ACCESS_REVOKED', 'AMAZON_DATA_RETENTION_DAYS']) if (env[key]) process.env[key] = env[key];
+const data = await readAmazonJson(path.join(process.cwd(), 'outputs', 'amazon-cdc', 'catalog.json'));
+const keys = [...new Set(data.rows.flatMap(row => Object.keys(row)))].sort();
+const selected = keys.filter(key => /parent|child|relationship|parentage|asin|sku/i.test(key));
+console.log(JSON.stringify({ rows: data.rows.length, selected, populated: Object.fromEntries(selected.map(key => [key, data.rows.filter(row => String(row[key] || '').trim()).length])) }));

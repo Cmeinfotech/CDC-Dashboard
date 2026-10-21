@@ -4,6 +4,7 @@ export type MissingAsin=CatalogRecord&{detectedAt:string;previousFile:string;cur
 export type AttributeChange={asin:string;sku:string;parentSku:string;changedFields:string[];changes:{field:string;previous:string;current:string}[];detectedAt:string;previousFile:string;currentFile:string};
 export type ImportedState={businessReportData:any[];orderExportData:any[];catalogData:CatalogRecord[];salesRecords:SalesRecord[];asinChanges:any[];asinHistory:any[];uploadHistory:any[];missingAsins:MissingAsin[];attributeChanges:AttributeChange[]};
 const KEY="cdc-imported-data-v3-real";const EMPTY:ImportedState={businessReportData:[],orderExportData:[],catalogData:[],salesRecords:[],asinChanges:[],asinHistory:[],uploadHistory:[],missingAsins:[],attributeChanges:[]};
-export function getImportedState():ImportedState{if(typeof window==="undefined")return structuredClone(EMPTY);try{return{...structuredClone(EMPTY),...JSON.parse(localStorage.getItem(KEY)||"{}")} }catch{return structuredClone(EMPTY)}}
-export function setImportedState(state:ImportedState){localStorage.setItem(KEY,JSON.stringify(state));window.dispatchEvent(new CustomEvent("cdc-data-updated"));}
+// Retired browser storage is not authenticated, account-scoped, or encrypted.
+export function getImportedState():ImportedState{return structuredClone(EMPTY)}
+export function setImportedState(_state:ImportedState):never{throw new Error('Browser-local report storage is disabled. Use authenticated server uploads.');}
 export function clearImportedState(){localStorage.removeItem(KEY);window.dispatchEvent(new CustomEvent("cdc-data-updated"));}
