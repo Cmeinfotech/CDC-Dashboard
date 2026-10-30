@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Undo2 } from 'lucide-react';
 import { trackingValue } from '../../../services/amazonTrackingChanges.mjs';
+import { GlobalDateRangeFilter, useGlobalDateRange } from '../../../components/GlobalDateRange';
 
 type Audit = { action: string; actor: string; at: string; previousParentAsins: string[]; currentParentAsins: string[] };
 type Change = { id: string; sku: string; asin: string; title: string; status: string; audit?: Audit[] };
@@ -9,12 +10,15 @@ type Product = { sku: string; asin: string; parentAsins: string[] };
 type Data = { changes: Change[]; run: { products: Product[] } | null };
 
 export default function ReversedMergesPage() {
+  const { startDate, endDate, selectedProductParents } = useGlobalDateRange();
+  const globalRangeActive = Boolean(startDate && endDate && startDate <= endDate);
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState('all');
   const [page, setPage] = useState(1);
   const [retry, setRetry] = useState(0);
+  useEffect(() => { setPage(1); }, [startDate, endDate, selectedProductParents]);
   useEffect(() => {
     const controller = new AbortController();
     setError('');
@@ -26,12 +30,29 @@ export default function ReversedMergesPage() {
     return ()=>controller.abort();
   }, [retry]);
   const latestReversal = (c: Change) => c.audit?.filter(e=>e.action === 'Reversed').at(-1);
-  const records = (data?.changes || []).filter(c=>c.status === 'Reversed' || latestReversal(c));
+  const inGlobalRange = (value?: string) => {
+    if (!globalRangeActive) return true;
+    if (!value) return false;
+    const time = new Date(value).getTime();
+    if (!Number.isFinite(time)) return false;
+    const date = new Date(time).toISOString().slice(0, 10);
+    return date >= startDate && date <= endDate;
+  };
+  const selectedProducts = data?.run?.products.filter(product => !selectedProductParents.length || selectedProductParents.includes(product.asin) || product.parentAsins.some(parent => selectedProductParents.includes(parent))) || [];
+  const selectedAsins = new Set([...selectedProductParents, ...selectedProducts.flatMap(product => [product.asin, ...product.parentAsins])]);
+  const records = (data?.changes || []).filter(c => {
+    const matchesSelection = !selectedProductParents.length || selectedProducts.some(product =>
+      product.sku === c.sku || product.asin === c.asin || product.parentAsins.includes(c.asin) ||
+      c.audit?.some(event => [...event.previousParentAsins, ...event.currentParentAsins].some(asin => selectedAsins.has(asin))),
+    );
+    return matchesSelection && (c.status === 'Reversed' || latestReversal(c)) && (!globalRangeActive || c.audit?.some(event => event.action === 'Reversed' && inGlobalRange(event.at)));
+  });
   const rows = records.filter(c=>(filter === 'all' || (filter === 'reversed' ? c.status === 'Reversed' : c.status !== 'Reversed')) && JSON.stringify(c).toLowerCase().includes(query.trim().toLowerCase())).sort((a,b)=>(latestReversal(b)?.at || '').localeCompare(latestReversal(a)?.at || ''));
   const pages = Math.max(1,Math.ceil(rows.length/10));
   const currentPage = Math.min(page,pages);
   return <main className="asin-history-page">
     <header className="asin-history-top"><a href="/?page=tracking"><ArrowLeft size={16}/> Back to ASIN tracking</a><span>CDC · Amazon product intelligence</span></header>
+    <GlobalDateRangeFilter />
     <div className="asin-history-heading"><div><span className="asin-history-eyebrow">PRODUCT / ASIN TRACKING</span><h1>Reversed merge history</h1><p>All records with a reversal, including those merged again later.</p></div><Undo2 size={32}/></div>
     {error ? <section className="asin-history-card" role="alert"><p>{error}</p><button onClick={()=>setRetry(x=>x+1)}>Try again</button></section> : !data ? <section className="asin-history-card" role="status">Loading reversed merges…</section> : <>
       <div className="asin-history-stats"><section className="asin-history-card"><small>Records with reversal history</small><strong>{records.length}</strong></section><section className="asin-history-card"><small>Currently reversed</small><strong>{records.filter(c=>c.status === 'Reversed').length}</strong></section><section className="asin-history-card"><small>Recorded reversal actions</small><strong>{records.reduce((n,c)=>n+(c.audit?.filter(e=>e.action === 'Reversed').length || 0),0)}</strong></section></div>

@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
+import { verifyDashboardSession } from './dashboardPasswordAuth.mjs';
 
 export const securityHeaders = {
   'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
@@ -14,18 +15,11 @@ export function auditAccess(request, status, user) {
     principal: user ? createHash('sha256').update(user.subject).digest('hex') : 'unauthenticated' }));
 }
 export function authenticatedUser(request, env = process.env, now = Date.now()) {
-  // Local development bypass applies only to loopback URLs; LAN clients require authentication.
-  const url = new URL(request.url);
-  if (env.NODE_ENV === 'development' && env.LOCAL_DASHBOARD_ACCESS === 'true' &&
-      ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) &&
-      request.headers.get('sec-fetch-site') !== 'cross-site' &&
-      (!request.headers.get('origin') || request.headers.get('origin') === url.origin)) {
-    return { subject: 'local-dashboard', userId: env.DEFAULT_USER_ID || 'dashboard', dataOwnerId: env.DEFAULT_USER_ID || 'dashboard', enabled: true, accounts: ['cdc', 'nana-jewellers'] };
-  }
   const bearer = request.headers.get('authorization');
   const cookie = request.headers.get('cookie')?.split(';').map(v => v.trim()).find(v => v.startsWith('cdc_session='))?.slice(12);
+  if (cookie?.startsWith('pwd1.')) return verifyDashboardSession(cookie, env, now);
   const token = bearer?.startsWith('Bearer ') ? bearer.slice(7) : cookie;
-  if (!token || token.length > 16000) throw Error('Sign in with your organization MFA account.');
+  if (!token || token.length > 16000) throw Error('Sign in to the dashboard.');
   if (!env.AUTH_JWT_PUBLIC_KEY || !env.AUTH_JWT_ISSUER || !env.AUTH_JWT_AUDIENCE || !env.AUTH_USERS_JSON) throw Error('Secure access is not configured.');
   const parts = token.split('.');
   if (parts.length !== 3 || parts.some(v => !/^[A-Za-z0-9_-]+$/.test(v))) throw Error('Invalid session.');
@@ -58,5 +52,16 @@ export function accessGuard(request, { amazon = false } = {}) {
       if (!origin || origin !== (process.env.APP_ORIGIN || url.origin) || request.headers.get('sec-fetch-site') === 'cross-site') return deny(403, 'Cross-site request denied.');
     }
     return null;
-  } catch { return deny(401, 'Verified MFA sign-in is required.'); }
+  } catch { return deny(401, 'Dashboard sign-in is required.'); }
+}
+
+export function deploymentConfigurationError(env = process.env) {
+  if (env.NODE_ENV === 'production' && (!env.APP_ORIGIN || !env.APP_ORIGIN.startsWith('https://'))) return 'Secure HTTPS deployment is not configured.';
+  if (env.NODE_ENV === 'production' && env.SECURITY_DEPLOYMENT_VERIFIED !== 'true') return 'Production security review and deployment setup are required.';
+  return null;
+}
+
+export function deploymentConfigurationResponse() {
+  const error = deploymentConfigurationError();
+  return error ? deny(503, error) : null;
 }

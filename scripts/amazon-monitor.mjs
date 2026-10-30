@@ -58,6 +58,7 @@ async function currentListings() {
   return { rows, marketplaceId: marketplace, pulledAt: new Date().toISOString(), reportId: report.reportId };
 }
 try {
+  await update({ stage: 'checking data retention' });
   await purgeExpiredAmazonData(root);
   await purgeExpiredAmazonData(sourceFolder);
   await update({});

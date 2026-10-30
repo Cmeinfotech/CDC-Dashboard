@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { classifyPriceChange } from './priceChangeSeverity.mjs';
 
 export function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
   return value ?? null;
 }
-const equal = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+// Avoid serializing and rebuilding large nested catalog values for every field
+// comparison. A full listing snapshot can contain thousands of products and
+// hundreds of megabytes of attributes/images; repeated canonical JSON strings
+// make the scheduled sync consume excessive memory during its compare stage.
+const equal = (a, b) => isDeepStrictEqual(a ?? null, b ?? null);
 const sorted = values => [...new Set(values)].sort();
 const attributeValue = (field, value) => field === 'bullet_point' || !Array.isArray(value) ? value : [...value].sort((a, b) => JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
 const marketData = (item, key, marketplace) => (item?.[key] || []).filter(group => group.marketplaceId === marketplace);
@@ -23,6 +29,13 @@ export function productRecords(listings, items, marketplace) {
     const item = details.get(asin);
     const summary = marketData(item, 'summaries', marketplace)[0] || {};
     const attributes = Object.fromEntries(Object.entries(item?.attributes || {}).map(([key, values]) => [key, Array.isArray(values) ? values.filter(entry => !entry.marketplace_id || entry.marketplace_id === marketplace) : values]));
+    const categories = marketData(item, 'classifications', marketplace).flatMap(group => group.classifications || []).map(category => `${category.displayName || category.classificationId || 'Category'}${category.classificationId ? ` (${category.classificationId})` : ''}`).sort();
+    const salesRanks = marketData(item, 'salesRanks', marketplace).flatMap(group => [
+      ...(group.classificationRanks || []).map(rank => `${rank.title || rank.classificationId || 'Category'}: #${rank.rank}`),
+      ...(group.displayGroupRanks || []).map(rank => `${rank.title || rank.websiteDisplayGroup || 'Display group'}: #${rank.rank}`),
+    ]).sort();
+    if (categories.length) attributes.catalog_category = categories;
+    if (salesRanks.length) attributes.sales_rank = salesRanks;
     const relationships = marketData(item, 'relationships', marketplace).flatMap(group => group.relationships || []);
     const parentAsins = sorted(relationships.filter(r => r.type === 'VARIATION').flatMap(r => r.parentAsins || []));
     const childAsins = sorted(relationships.filter(r => r.type === 'VARIATION').flatMap(r => r.childAsins || []));
@@ -32,7 +45,7 @@ export function productRecords(listings, items, marketplace) {
       if (!old || image.width * image.height > old.width * old.height) imageMap.set(image.variant, image);
     }
     const images = [...imageMap].sort(([a], [b]) => a.localeCompare(b)).map(([variant, image]) => ({ variant, link: image.link }));
-    records.push({ sku, asin, title: summary.itemName || listing['item-name'] || listing['\uFEFFitem-name'] || '',
+    records.push({ sku, asin, title: summary.itemName || asin,
       listing: { title: listing['item-name'] || listing['\uFEFFitem-name'] || '', price: listing.price ?? null, quantity: listing.quantity === '' ? null : listing.quantity ?? null, status: listing.status || '', fulfillment: listing['fulfillment-channel'] || '' },
       detailsAvailable: Boolean(item), attributes, images, parentAsins, childAsins,
       parentage: item ? parentAsins.length ? 'Child' : childAsins.length ? 'Parent' : 'Unspecified' : 'Unavailable',
@@ -51,8 +64,10 @@ export function compareProducts(previous, current, { runId, detectedAt, previous
   const add = (kind, field, before, after, product, availability = 'observed') => {
     const id = createHash('sha256').update(JSON.stringify([runId, product.sku, kind, field])).digest('hex');
     const structural = ['asin', 'missing', 'family'].includes(kind);
+    const priceSeverity = field === 'listing.price' ? classifyPriceChange(before, after).severity : null;
+    const priority = priceSeverity || (structural ? 'High' : kind === 'attribute' || kind === 'images' ? 'Medium' : 'Low');
     changes.push({ id, runId, previousRunId, detectedAt, sku: product.sku, asin: product.asin, title: product.title,
-      kind, field, previous: canonical(before), current: canonical(after), priority: structural ? 'High' : kind === 'attribute' || kind === 'images' ? 'Medium' : 'Low',
+      kind, field, previous: canonical(before), current: canonical(after), priority,
       availability, status: 'Unreviewed', attribution: 'Observed between Amazon API pulls. Actor and exact modification time are not supplied.' });
   };
   for (const next of current.products) {
@@ -68,6 +83,9 @@ export function compareProducts(previous, current, { runId, detectedAt, previous
     for (const field of ['parentAsins', 'childAsins']) if (!equal(old[field], next[field])) add('family', field, old[field], next[field], next);
     if (!equal(old.images, next.images)) add('images', 'images', old.images, next.images, next);
     for (const field of sorted([...Object.keys(old.attributes), ...Object.keys(next.attributes)])) {
+      // These fields were added to monitoring after older snapshots were already stored.
+      // Their first observed values establish the baseline; they are not product changes.
+      if (['catalog_category', 'sales_rank'].includes(field) && !Object.hasOwn(old.attributes, field)) continue;
       if (!equal(attributeValue(field, old.attributes[field]), attributeValue(field, next.attributes[field]))) {
         const absent = !Object.hasOwn(old.attributes, field) || !Object.hasOwn(next.attributes, field);
         add('attribute', `attributes.${field}`, old.attributes[field], next.attributes[field], next, absent ? 'field returned/omitted by API; omission is not confirmed deletion' : 'observed');

@@ -8,6 +8,12 @@ const derive = promisify(scrypt);
 export function isMainAdmin(user, env = process.env) {
   return Boolean(env.AUTH_MAIN_ADMIN_USER_ID && user?.userId === env.AUTH_MAIN_ADMIN_USER_ID);
 }
+export function canCloseNotifications(user) {
+  return Boolean(user && user.role === 'lead');
+}
+export function canManageDashboardUsers(user, env = process.env) {
+  return Boolean(user && (user.role === 'admin' || isMainAdmin(user, env)));
+}
 export function adminConfigured(env = process.env) {
   return Boolean(env.AUTH_MAIN_ADMIN_USER_ID && /^scrypt:[a-f0-9]{32}:[a-f0-9]{128}$/.test(env.AUTH_MAIN_ADMIN_PASSWORD_HASH || ''));
 }

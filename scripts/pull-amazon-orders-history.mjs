@@ -71,7 +71,10 @@ async function saveCombined(rows, range) {
   const existing = await readAmazonJson(combinedFile, { rows: [] });
   const merged = new Map((existing.rows || []).map(row => [rowKey(row), row]));
   for (const row of rows) merged.set(rowKey(row), row);
-  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: range.start, end: range.end, rows: [...merged.values()] };
+  const oldestSavedSale = [...merged.values()].map(row => String(row['purchase-date'] || '').slice(0, 10)).filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort()[0];
+  const coverageStart = [existing.coverageStart || existing.start, oldestSavedSale, range.start].filter(Boolean).sort()[0];
+  const coverageEnd = [existing.coverageEnd || existing.end, range.end].filter(Boolean).sort().at(-1);
+  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: range.start, end: range.end, coverageStart, coverageEnd, rows: [...merged.values()] };
   await atomicJson(combinedFile, data);
   return data.rows.length;
 }
@@ -83,7 +86,7 @@ async function rebuildCombined(status) {
     if (!part?.rows) throw Error(`Saved order batch ${index + 1} is missing; history was not replaced.`);
     for (const row of part.rows) merged.set(rowKey(row), row);
   }
-  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: status.start, end: status.end, rows: [...merged.values()] };
+  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: status.start, end: status.end, coverageStart: status.start, coverageEnd: status.end, rows: [...merged.values()] };
   await atomicJson(combinedFile, data);
   return data.rows.length;
 }
@@ -92,7 +95,16 @@ try {
   const now = new Date();
   const initialStart = mode === 'history' ? new Date(Date.UTC(now.getUTCFullYear() - 2, now.getUTCMonth(), now.getUTCDate())) : new Date(now.getTime() - 7 * 86400000);
   let status = await readAmazonJson(statusFile, null);
-  if (!status || status.mode !== mode || status.marketplaceId !== marketplaceId) {
+  const canResume = status
+    && status.mode === mode
+    && status.marketplaceId === marketplaceId
+    && status.status !== 'complete'
+    && Array.isArray(status.ranges)
+    && status.completed < status.ranges.length;
+  // A completed incremental status describes the previous run. Start a fresh
+  // rolling seven-day report on the next scheduled run; only unfinished runs
+  // should reuse their saved report IDs and ranges.
+  if (!canResume) {
     status = { mode, marketplaceId, startedAt: new Date().toISOString(), start: iso(initialStart), end: iso(now), ranges: chunkRanges(initialStart, now), completed: 0, rows: 0, status: 'running' };
   }
   for (let index = status.completed; index < status.ranges.length; index++) {

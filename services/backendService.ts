@@ -1,12 +1,13 @@
 import * as XLSX from "xlsx";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { getDb } from "../db";
-import { asinHistory, detectedChanges, snapshotRows, uploads } from "../db/schema";
+import { asinHistory, changeAudit, detectedChanges, snapshotRows, uploads } from "../db/schema";
 import { detectReportType, type ReportType } from "../utils/reportDetection";
 import { mapHeaders } from "../utils/headerMapping";
 import { monthValue, numberValue, textValue } from "../utils/dataNormalization";
 import { authenticatedUser } from './accessSecurity.mjs';
 import { minimizeAmazonData } from './amazonDataSecurity.mjs';
+import { monitorState } from './amazonMonitorStore.mjs';
 import { expireAccountData } from './dataRetention';
 
 export const requestUserId = (request: Request) => {
@@ -27,7 +28,11 @@ const importDateKey = (value: unknown) => {
       return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
     }
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  // Amazon order timestamps carry an offset, but the report's calendar date is
+  // the date users filter on. Converting through UTC can move an order across
+  // a day boundary and make it disappear from a selected date range.
+  const isoDate = raw.match(/^(\d{4}-\d{2}-\d{2})(?:$|[Tt ])/);
+  if (isoDate) return isoDate[1];
   const month = raw.match(/^(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(20\d{2})$/i);
   if (month) { const index = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(month[1].slice(0, 3).toLowerCase()); return `${month[2]}-${String(index + 1).padStart(2, "0")}-01`; }
   const parsed = new Date(raw); return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
@@ -153,7 +158,7 @@ function parseWorkbook(buffer: ArrayBuffer): ParsedWorkbook | { error: string[];
   return { type, sheet: selected.name, sheets: workbook.SheetNames, total: selected.objects.length, invalid, rows, revenue };
 }
 
-export async function saveUpload(request: Request, file: File, dateRange: { startDate?: string; endDate?: string } = {}) {
+export async function saveUpload(request: Request, file: File, dateRange: { startDate?: string; endDate?: string } = {}, actor = "Unknown user") {
   if (!/\.xlsx?$/i.test(file.name)) throw new Error("Only .xlsx or .xls workbooks are supported.");
   if (file.size > 25 * 1024 * 1024) throw new Error("Workbook exceeds the 25 MB upload limit. Split the file before uploading.");
   const parsed = parseWorkbook(await file.arrayBuffer());
@@ -195,6 +200,7 @@ export async function saveUpload(request: Request, file: File, dateRange: { star
     for (const group of chunks(parsed.rows)) await db.insert(snapshotRows).values(group.map(row => ({ uploadId: id, userId, reportType: parsed.type, ...row })));
     for (const group of chunks(changeValues, 5)) if (group.length) await db.insert(detectedChanges).values(group);
   } catch (error) { await db.delete(uploads).where(eq(uploads.id, id)); throw error; }
+  await db.insert(changeAudit).values({ id: crypto.randomUUID(), userId, actor, action: "Uploaded", entityType: parsed.type, entityId: id, summary: `Uploaded ${file.name} (${parsed.rows.length.toLocaleString()} valid rows; ${changeValues.length.toLocaleString()} detected changes).`, details: { file: file.name, reportType: parsed.type, sheet: parsed.sheet, rows: parsed.rows.length, detectedChanges: changeValues.length, changes: changeValues.slice(0, 100).map(change => ({ kind: change.kind, product: change.product, sku: change.sku, previousAsin: change.previousAsin, currentAsin: change.currentAsin, fields: change.details })) } });
   return { file: file.name, size: file.size, type: parsed.type, sheet: parsed.sheet, sheets: parsed.sheets, rows: parsed.total, valid: parsed.rows.length, invalid: parsed.invalid, filteredOut, importedDateRange, missing: [], parents, children, products: parsed.type === "business" ? parents : parsed.rows.length, changes: changeValues.length, status: "Ready", revenue: parsed.revenue };
 }
 
@@ -219,10 +225,35 @@ async function importedReportRows(userId: string, type: string) {
   return { uploads: selected, rows: hydrateSnapshotRows(rows) };
 }
 
+async function amazonOrderHistoryRows(userId: string) {
+  const db = getDb();
+  // Do not route the live two-year order history through importedReportRows:
+  // that helper intentionally keeps only the newest upload per worksheet name,
+  // so an unrelated workbook with an "Amazon Orders" sheet can mask this pull.
+  const [upload] = await db.select().from(uploads)
+    .where(and(
+      eq(uploads.userId, userId),
+      eq(uploads.reportType, "orders"),
+      eq(uploads.fileName, "Amazon Two-Year Order History"),
+      eq(uploads.sheetName, "Amazon Orders"),
+    ))
+    .orderBy(desc(uploads.createdAt), desc(uploads.id))
+    .limit(1);
+  const rows = upload
+    ? await db.select().from(snapshotRows).where(eq(snapshotRows.uploadId, upload.id))
+    : [];
+  return { upload, rows: hydrateSnapshotRows(rows) };
+}
+
 export async function uploadHistory(userId: string) {
   await expireAccountData(userId);
   const rows = await getDb().select().from(uploads).where(eq(uploads.userId, userId)).orderBy(desc(uploads.createdAt), desc(uploads.id)).limit(30);
   return rows.map(row => ({ file: row.fileName, size: row.fileSize, type: row.reportType, sheet: row.sheetName, rows: row.rowCount, valid: row.validCount, invalid: row.invalidCount, date: displayDate(row.createdAt), status: "Ready", missing: [], parents: row.parentsCount, children: row.childrenCount, products: row.validCount, changes: row.changesCount, revenue: row.revenue / 100 }));
+}
+
+export async function changeAuditHistory(userId: string) {
+  const rows = await getDb().select().from(changeAudit).where(eq(changeAudit.userId, userId)).orderBy(desc(changeAudit.createdAt), desc(changeAudit.id)).limit(500);
+  return rows;
 }
 
 export async function trackingData(userId: string) {
@@ -307,23 +338,25 @@ export function buildProducts(business: typeof snapshotRows.$inferSelect[], cata
     const children = [...new Set(rows.map(r => r.asin))].map(asin => {
       const item = catalogByAsin.get(asin); const raw = item?.data || {};
       const itemTitle = catalogField(raw, ["Title", "Product Name", "Item Name", "Product Title"]);
-      return { asin, sku: item?.sku || "", parentSku: catalogField(raw, ["Parent SKU"]), label: item ? [raw.Color, raw.Size, raw.Style].filter(Boolean).join(" · ") || itemTitle : textValue(rows.find(r => r.asin === asin)?.data.title) || asin, title: itemTitle || textValue(rows.find(r => r.asin === asin)?.data.title), attributes: raw, catalogAvailable: Boolean(item), catalogSource: item ? catalogFileName : "Not supplied in latest Product Catalog", status: catalogField(raw, ["Status", "Listing Status"]) || "Unknown" };
+      const usTitle = itemTitle || textValue(rows.find(r => r.asin === asin)?.data.title);
+      return { asin, sku: item?.sku || "", parentSku: catalogField(raw, ["Parent SKU"]), label: item ? [raw.Color, raw.Size, raw.Style].filter(Boolean).join(" · ") || usTitle : usTitle || asin, title: usTitle, image: catalogField(raw, ["Image URL", "Main Image URL", "Image", "Main Image"]), attributes: raw, catalogAvailable: Boolean(item), catalogSource: item ? catalogFileName : "Not supplied in latest Product Catalog", status: catalogField(raw, ["Status", "Listing Status"]) || "Unknown" };
     });
     const first = children[0]; const firstCatalogChild = children.find(child => child.catalogAvailable) || first;
     const primaryCatalogData = firstCatalogChild?.attributes || {};
     const category = catalogField(primaryCatalogData, ["Category", "Product Category", "Product Type", "Item Type Keyword"]) || "Uncategorized";
     const parentSku = firstCatalogChild?.parentSku || "";
     const catalogChildren = children.filter(child => child.catalogAvailable).length;
-    return { parent, parentSku, familyId: parentSku ? `FAM-${parentSku.replace(/[^a-z0-9]/gi, "")}` : "", name: textValue(rows.find(r => r.data.title)?.data.title) || first?.title || parent, category, trend: "stable", catalogCoverage: `${catalogChildren} of ${children.length} child ASINs found in ${catalogFileName}`, children };
+    return { parent, parentSku, familyId: parentSku ? `FAM-${parentSku.replace(/[^a-z0-9]/gi, "")}` : "", name: firstCatalogChild?.title || textValue(rows.find(r => r.data.title)?.data.title) || parent, image: children.find(child => child.image)?.image || "", category, trend: "stable", catalogCoverage: `${catalogChildren} of ${children.length} child ASINs found in ${catalogFileName}`, children };
   });
 }
 
-export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], products: ReturnType<typeof buildProducts>, catalog: typeof snapshotRows.$inferSelect[] = [], orders: typeof snapshotRows.$inferSelect[] = [], amazonOrdersOnly = false) {
+export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], products: ReturnType<typeof buildProducts>, catalog: typeof snapshotRows.$inferSelect[] = [], orders: typeof snapshotRows.$inferSelect[] = [], amazonOrdersOnly = false, amazonParentByChild = new Map<string, string>()) {
+  const analyticsBusiness = amazonOrdersOnly ? [] : business;
   const monthKey = (value: string) => importDateKey(value) || value;
-  const months = [...new Set(business.map(row => row.month).filter(Boolean))].sort((a, b) => monthKey(a).localeCompare(monthKey(b)));
+  const months = [...new Set(analyticsBusiness.map(row => row.month).filter(Boolean))].sort((a, b) => monthKey(a).localeCompare(monthKey(b)));
   const parentMetricsByAsin = new Map<string, { sales: number; units: number; orders: number; sessions: number; pageViews: number }>();
   const monthlySalesByParent = new Map<string, Map<string, number>>();
-  for (const row of business) {
+  for (const row of analyticsBusiness) {
     const parent = row.parentAsin;
     if (!parent) continue;
     const totals = parentMetricsByAsin.get(parent) || { sales: 0, units: 0, orders: 0, sessions: 0, pageViews: 0 };
@@ -338,43 +371,43 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
     monthTotals.set(parent, (monthTotals.get(parent) || 0) + Number(row.data.sales || 0));
     monthlySalesByParent.set(row.month, monthTotals);
   }
-  const monthlySales = months.map(month => {
+  let monthlySales = months.map(month => {
     const monthTotals = monthlySalesByParent.get(month);
     return { month, ...Object.fromEntries(products.map(product => [product.parent, monthTotals?.get(product.parent) || 0])) };
   });
-  const dailyTotals = new Map<string, Record<string, number>>();
-  for (const row of business) {
+  const dailyTotals = new Map<string, Record<string, string | number>>();
+  for (const row of analyticsBusiness) {
     const date = textValue(row.data.date);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
     const point = dailyTotals.get(date) || { date };
-    point[row.parentAsin] = (point[row.parentAsin] || 0) + Number(row.data.sales || 0);
+    point[row.parentAsin] = Number(point[row.parentAsin] || 0) + Number(row.data.sales || 0);
     dailyTotals.set(date, point);
   }
   // A Business Report can contain only monthly totals.  In that case a dated
   // Order Export is the real source for day and week views.  We intentionally
   // do not manufacture daily values by splitting a monthly total.
-  const parentByChildAsin = new Map([
-    ...catalog.filter(row => row.asin).map(row => [row.asin, row.parentAsin || row.asin]),
-    ...business.filter(row => row.asin && row.parentAsin).map(row => [row.asin, row.parentAsin]),
+  const parentByChildAsin = amazonOrdersOnly ? amazonParentByChild : new Map<string, string>([
+    ...catalog.filter(row => row.asin).map(row => [row.asin, row.parentAsin || row.asin] as [string, string]),
+    ...business.filter(row => row.asin && row.parentAsin).map(row => [row.asin, row.parentAsin] as [string, string]),
   ]);
-  const catalogContextByAsin = new Map(catalog.filter(row => row.asin).map(row => {
+  const catalogContextByAsin = new Map<string, { title: string; parentAsin: string }>(catalog.filter(row => row.asin).map(row => {
     const item = jsonRecord(row.data);
     return [row.asin, {
       title: catalogField(item, ["Title", "Product Name", "Item Name", "Product Title"]),
       parentAsin: row.parentAsin || "",
-    }];
+    }] as [string, { title: string; parentAsin: string }];
   }));
-  const orderRecords = orders.map(row => {
+  const orderRecords: Record<string, any>[] = orders.map(row => {
     const childAsin = textValue(row.data.childAsin) || row.asin;
     const catalogContext = catalogContextByAsin.get(childAsin);
     return {
       ...row.data,
       orderDate: importDateKey(row.data.orderDate),
       childAsin,
-      // Keep the report title when supplied, with the latest catalog as a
-      // fallback for older order exports that do not have a product-name column.
-      title: textValue(row.data.title) || catalogContext?.title || "",
-      parentAsin: parentByChildAsin.get(childAsin) || catalogContext?.parentAsin || "",
+      // On the live CDC dashboard the saved US Amazon catalog is authoritative;
+      // order report titles can use a different locale for the same ASIN.
+      title: amazonOrdersOnly ? catalogContext?.title || childAsin : textValue(row.data.title) || catalogContext?.title || "",
+      parentAsin: parentByChildAsin.get(childAsin) || (amazonOrdersOnly ? childAsin : catalogContext?.parentAsin || ""),
     };
   });
   const dailyOrderRecords = new Map<string, Record<string, unknown>>();
@@ -385,8 +418,8 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
       if (!date || !parentAsin) continue;
       const sales = Number(row.itemPrice || 0);
       const units = Number(row.quantity || 0);
-      const point = dailyTotals.get(date) || { date };
-      point[parentAsin] = (point[parentAsin] || 0) + sales;
+      const point: Record<string, string | number> = dailyTotals.get(date) || { date };
+      point[parentAsin] = Number(point[parentAsin] || 0) + sales;
       dailyTotals.set(date, point);
       const childAsin = textValue(row.childAsin);
       // Do not combine different child listings into one parent-only sale.
@@ -425,6 +458,39 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
     aggregate.orders = Number(aggregate.orders) + Number(row.orders || 0);
     monthlyOrderRecords.set(key, aggregate);
   }
+  // Sales Analytics in the live dashboard must use the Amazon Order History
+  // pull. Business-report imports are a separate workflow and must not be
+  // substituted for missing Amazon monthly totals. The order rows above are
+  // already grouped by month, parent ASIN and child ASIN, so roll those real
+  // pulled amounts up by month and parent for the monthly chart.
+  if (amazonOrdersOnly && monthlyOrderRecords.size) {
+    const orderSalesByMonth = new Map<string, Map<string, number>>();
+    for (const row of monthlyOrderRecords.values()) {
+      const month = textValue(row.month);
+      const parent = textValue(row.parentAsin);
+      if (!month || !parent) continue;
+      const parentTotals = orderSalesByMonth.get(month) || new Map<string, number>();
+      parentTotals.set(parent, (parentTotals.get(parent) || 0) + Number(row.sales || 0));
+      orderSalesByMonth.set(month, parentTotals);
+    }
+    const observedMonths = [...orderSalesByMonth.keys()].sort();
+    if (observedMonths.length) {
+      const monthKeys: string[] = [];
+      const cursor = new Date(`${observedMonths[0]}-01T00:00:00`);
+      const lastMonth = new Date(`${observedMonths.at(-1)}-01T00:00:00`);
+      while (cursor <= lastMonth) {
+        monthKeys.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+      monthlySales = monthKeys.map((month) => {
+        const totals = orderSalesByMonth.get(month);
+        return {
+          month,
+          ...Object.fromEntries(products.map(product => [product.parent, totals?.get(product.parent) || 0])),
+        };
+      });
+    }
+  }
   const dailySales = [...dailyTotals.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const metrics = Object.fromEntries(products.map(product => [
     product.parent,
@@ -432,7 +498,7 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
   ]));
   const normalizedAsin = (value: unknown) => textValue(value).trim().toUpperCase();
   const childMetricsByAsin = new Map<string, { sales: number; units: number; orders: number; sessions: number; pageViews: number }>();
-  for (const row of business) {
+  for (const row of analyticsBusiness) {
     const asin = normalizedAsin(row.asin || row.data.childAsin);
     if (!asin) continue;
     const summary = childMetricsByAsin.get(asin) || { sales: 0, units: 0, orders: 0, sessions: 0, pageViews: 0 };
@@ -448,7 +514,7 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
       .filter(([, metrics]) => Number(metrics.sales || 0) || Number(metrics.units || 0) || Number(metrics.orders || 0))
       .map(([asin]) => asin),
   );
-  const businessSalesRecords = business.map(row => ({
+  const businessSalesRecords = analyticsBusiness.map(row => ({
     ...row.data,
     month: textValue(row.data.month) || row.month,
     parentAsin: textValue(row.data.parentAsin) || row.parentAsin,
@@ -474,79 +540,88 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
   // totals and the newest detail rows, avoiding a multi-year response that can
   // freeze the browser or delay a refresh.
   const dashboardOrderRecords = orderRecords.length > 10_000 ? orderRecords.slice(-10_000) : orderRecords;
-  return { products, monthlySales, dailySales, metrics, childMetrics, granularity: dailySales.length ? "daily" : "monthly", salesRecords: monthlyOrderRecords.size ? [...monthlyOrderRecords.values()] : amazonOrdersOnly ? [] : businessSalesRecords, businessSalesRecords, catalogRecords: catalog.map(row => ({ asin: row.asin, sku: row.sku, parentSku: textValue(row.data["Parent SKU"]), ...row.data })), orderRecords: dashboardOrderRecords };
+  if (amazonOrdersOnly) {
+    for (const row of monthlyOrderRecords.values()) {
+      const parent = textValue(row.parentAsin);
+      if (!parent) continue;
+      const totals = parentMetricsByAsin.get(parent) || { sales: 0, units: 0, orders: 0, sessions: 0, pageViews: 0 };
+      totals.sales += Number(row.sales || 0);
+      totals.units += Number(row.units || 0);
+      totals.orders += Number(row.orders || 0);
+      parentMetricsByAsin.set(parent, totals);
+      metrics[parent] = totals;
+    }
+  }
+  return { products, monthlySales, dailySales, dailySalesRecords: [...dailyOrderRecords.values()], metrics, childMetrics, granularity: dailySales.length ? "daily" : "monthly", salesRecords: monthlyOrderRecords.size ? [...monthlyOrderRecords.values()] : amazonOrdersOnly ? [] : businessSalesRecords, businessSalesRecords, catalogRecords: catalog.map(row => ({ asin: row.asin, sku: textValue(row.data["Parent SKU"]), ...row.data })), orderRecords: dashboardOrderRecords };
 }
 
 export async function dashboardData(userId: string) {
   await expireAccountData(userId);
-  const db = getDb();
-  const [
-    { uploads: businessUploads, rows: businessRows },
-    { rows: catalog },
-    { uploads: orderUploads, rows: orders },
-    asinChanges,
-    histories,
-  ] = await Promise.all([
-    importedReportRows(userId, "business"),
-    latestRows(userId, "catalog"),
-    importedReportRows(userId, "orders"),
-    db
-      .select()
-      .from(detectedChanges)
-      .where(
-        and(
-          eq(detectedChanges.userId, userId),
-          eq(detectedChanges.kind, "asin"),
-        ),
-      ),
-    db.select().from(asinHistory).where(eq(asinHistory.userId, userId)),
-  ]);
-  const business = withBusinessReportMonth(businessRows, businessUploads);
-  // All Product Sales uses only the order report written by the Amazon pull.
-  // Uploaded spreadsheets can still serve the analytics/import workflow, but
-  // they must not be shown here as live Amazon sales.
-  const amazonOrderUploadIds = new Set(orderUploads
-    .filter(upload => upload.fileName === "Amazon Two-Year Order History" && upload.sheetName === "Amazon Orders")
-    .map(upload => upload.id));
-  const amazonOrders = orders.filter(order => amazonOrderUploadIds.has(order.uploadId));
-  const productSource = business.length ? business : catalog.map(row => ({ ...row, parentAsin: row.parentAsin || row.asin, data: { ...jsonRecord(row.data), title: catalogField(jsonRecord(row.data), ["Title", "Product Name", "Item Name", "Product Title"]) } })) as typeof business;
-  const products = buildProducts(productSource, catalog);
-  const mergedAsinSearch = [
-    ...asinChanges.map((record) => ({
-      product: record.product,
-      sku: record.sku,
-      parentSku: record.parentSku,
-      previous: record.previousAsin,
-      current: record.currentAsin,
-      status: record.status,
-    })),
-    ...histories.map((record) => ({
-      product: record.product,
-      previous: record.previousAsin,
-      current: record.currentAsin,
-      status: "Merged",
-    })),
-  ];
-  return {
-    ...buildAnalytics(business, products, catalog, amazonOrders, true),
-    mergedAsinSearch,
-  };
+  const { rows: orders } = await amazonOrderHistoryRows(userId);
+  // Live dashboard figures are sourced only from the saved Amazon order pull.
+  const amazonOrders = orders;
+  let amazonPulledProducts: any[] = [];
+  if (userId.endsWith("::cdc")) {
+    try {
+      const state = await monitorState();
+      amazonPulledProducts = state.dashboardRun?.products || state.run?.products || [];
+    } catch {
+      // Continue with the saved Amazon order pull; missing catalog details should
+      // not cause manual workbook rows to be substituted into the live dashboard.
+    }
+  }
+  const pulledProductByAsin = new Map(amazonPulledProducts.filter(product => product.asin).map(product => [textValue(product.asin), product]));
+  const amazonParentByChild = new Map<string, string>();
+  for (const product of amazonPulledProducts) {
+    const asin = textValue(product.asin);
+    const parentAsins = Array.isArray(product.parentAsins) ? product.parentAsins.map(textValue).filter(Boolean) : [];
+    amazonParentByChild.set(asin, parentAsins[0] || asin);
+    for (const child of Array.isArray(product.childAsins) ? product.childAsins.map(textValue).filter(Boolean) : []) amazonParentByChild.set(child, asin);
+  }
+  const amazonCatalog = amazonPulledProducts.filter(product => product.asin).map(product => {
+    const image = (product.images || []).find((item: any) => item.variant === "MAIN")?.link || product.images?.[0]?.link || "";
+    const attributes = product.attributes || {};
+    const attributeText = (key: string) => {
+      const value = attributes[key];
+      return Array.isArray(value) ? value.map((item: any) => textValue(item?.value)).filter(Boolean).join(", ") : textValue(value);
+    };
+    return {
+      asin: textValue(product.asin),
+      sku: textValue(product.sku),
+      parentAsin: amazonParentByChild.get(textValue(product.asin)) || textValue(product.asin),
+      data: { Title: textValue(product.title), "Image URL": image, Category: attributeText("item_type_keyword") || attributeText("product_type"), Brand: attributeText("brand") },
+    };
+  }) as unknown as typeof snapshotRows.$inferSelect[];
+  const amazonOrderProductSource = amazonOrders.filter(row => textValue(row.data.childAsin || row.asin)).map(row => {
+    const asin = textValue(row.data.childAsin || row.asin);
+    const pulledProduct = pulledProductByAsin.get(asin);
+    return {
+      ...row,
+      asin,
+      parentAsin: amazonParentByChild.get(asin) || asin,
+      data: { ...jsonRecord(row.data), childAsin: asin, title: textValue(pulledProduct?.title) || asin },
+    };
+  }) as typeof amazonOrders;
+  const products = buildProducts(amazonOrderProductSource, amazonCatalog, "Latest Amazon product pull");
+  return buildAnalytics([], products, amazonCatalog, amazonOrders, true, amazonParentByChild);
 }
 
-export async function mergeChange(userId: string, id: string) {
+export async function mergeChange(userId: string, id: string, actor = "Unknown user") {
   const db = getDb(); const [change] = await db.select().from(detectedChanges).where(and(eq(detectedChanges.id, id), eq(detectedChanges.userId, userId))).limit(1);
   if (!change || change.kind !== "asin") throw new Error("ASIN change was not found.");
   await db.update(detectedChanges).set({ status: "Merged" }).where(eq(detectedChanges.id, id));
   await db.insert(asinHistory).values({ userId, product: change.product, currentAsin: change.currentAsin, previousAsin: change.previousAsin });
+  await db.insert(changeAudit).values({ id: crypto.randomUUID(), userId, actor, action: "Merged ASIN history", entityType: "asin", entityId: id, summary: `${change.product || change.sku || "Product"}: ${change.previousAsin} → ${change.currentAsin}`, details: { product: change.product, sku: change.sku, previousAsin: change.previousAsin, currentAsin: change.currentAsin } });
   return { id, preservedHistory: true };
 }
 
-export async function mergeAllChanges(userId: string) {
+export async function mergeAllChanges(userId: string, actor = "Unknown user") {
   const db = getDb();
   const ready = await db.select().from(detectedChanges).where(and(eq(detectedChanges.userId, userId), eq(detectedChanges.kind, "asin"), eq(detectedChanges.status, "Ready to merge")));
   for (const change of ready) {
     await db.update(detectedChanges).set({ status: "Merged" }).where(eq(detectedChanges.id, change.id));
     await db.insert(asinHistory).values({ userId, product: change.product, currentAsin: change.currentAsin, previousAsin: change.previousAsin });
   }
+  if (ready.length) await db.insert(changeAudit).values(ready.map(change => ({ id: crypto.randomUUID(), userId, actor, action: "Merged ASIN history", entityType: "asin", entityId: change.id, summary: `${change.product || change.sku || "Product"}: ${change.previousAsin} → ${change.currentAsin}`, details: { product: change.product, sku: change.sku, previousAsin: change.previousAsin, currentAsin: change.currentAsin } })));
   return { merged: ready.length, preservedHistory: true };
 }

@@ -23,7 +23,16 @@ export async function amazonFetch(url, init = {}, { fetchImpl = fetch, sleep = m
   // Retry safe reads and explicit throttling only. A failed POST can already have created a report.
   const read = ['GET', 'HEAD'].includes((init.method || 'GET').toUpperCase());
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetchImpl(url, { ...init, redirect: 'error', signal: init.signal || AbortSignal.timeout(30000) });
+    let response;
+    try {
+      response = await fetchImpl(url, { ...init, redirect: 'error', signal: init.signal || AbortSignal.timeout(30000) });
+    } catch (error) {
+      // A failed safe read can be retried; an ambiguous report-creation POST
+      // must not be repeated. Respect caller cancellation.
+      if (!read || attempt === 3 || init.signal?.aborted || !['TimeoutError', 'TypeError'].includes(error.name)) throw error;
+      await sleep(1000 * 2 ** attempt);
+      continue;
+    }
     if (attempt === 3 || !(response.status === 429 || read && [500, 502, 503, 504].includes(response.status))) return response;
     await response.body?.cancel();
     await sleep(retryDelay(response, attempt));

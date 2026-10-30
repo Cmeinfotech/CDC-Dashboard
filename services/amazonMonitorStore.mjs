@@ -4,26 +4,77 @@ import { randomUUID } from 'node:crypto';
 import { openAmazonData, sealAmazonData, purgeExpiredAmazonData } from './amazonDataSecurity.mjs';
 
 export const monitorRoot = () => path.resolve(process.env.AMAZON_MONITOR_DATA_DIR || path.join(process.cwd(), 'data-store', 'amazon-monitor'));
+const recoverableControlFile = file => ['automation.json', 'progress.json', 'latest.json', 'account-health-progress.json'].includes(path.basename(file));
 export async function readJson(file, fallback = null) {
-  try { const text = await fs.readFile(file, 'utf8'); return file.endsWith('.lock') ? JSON.parse(text) : openAmazonData(text, file, fallback); } catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
+  try { const text = await fs.readFile(file, 'utf8'); return file.endsWith('.lock') ? JSON.parse(text) : openAmazonData(text, file, fallback); }
+  catch (error) {
+    if (recoverableControlFile(file) && (error.code === 'ENOENT' || error instanceof SyntaxError)) {
+      try { return openAmazonData(await fs.readFile(`${file}.bak`, 'utf8'), file, fallback); }
+      catch (backupError) { if (backupError.code !== 'ENOENT') throw error; }
+    }
+    if (error.code === 'ENOENT') return fallback;
+    throw error;
+  }
+}
+async function durableReplace(file, text) {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try { await handle.writeFile(text); await handle.sync(); }
+  finally { await handle.close(); }
+  try {
+    // Windows scanners/readers can briefly deny replacing an existing file.
+    // Retry long enough for those transient sharing locks to clear without
+    // removing the last known-good file first.
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { await fs.rename(temporary, file); return; }
+      catch (error) {
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt === 39) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(100 * (2 ** attempt), 1000)));
+      }
+    }
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    throw error;
+  }
 }
 export async function atomicJson(file, data) {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporary, sealAmazonData(data, file), { mode: 0o600 });
-  for (let attempt = 0; attempt < 20; attempt++) {
-    try { await fs.rename(temporary, file); return; }
-    catch (error) { if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt === 19) throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
+  if (recoverableControlFile(file)) {
+    try {
+      const previous = await fs.readFile(file, 'utf8');
+      // Preserve only authenticated last-good state, never a damaged primary.
+      openAmazonData(previous, file);
+      await durableReplace(`${file}.bak`, previous);
+    } catch (error) {
+      if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+    }
   }
+  await durableReplace(file, sealAmazonData(data, file));
 }
 export async function acquireLock(name) {
   const root = monitorRoot(); await fs.mkdir(root, { recursive: true });
   const file = path.join(root, `${name}.lock`);
   for (let attempt = 0; attempt < 2; attempt++) {
-    try { const handle = await fs.open(file, 'wx'); await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })); await handle.close(); return async () => { await fs.unlink(file); }; }
+    try {
+      const token = randomUUID();
+      const handle = await fs.open(file, 'wx');
+      try { await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token })); await handle.sync(); }
+      finally { await handle.close(); }
+      return async () => { const current = await readJson(file); if (current?.token === token) await fs.unlink(file); };
+    }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      const lock = await readJson(file);
+      let lock;
+      try { lock = await readJson(file); }
+      catch (readError) {
+        if (!(readError instanceof SyntaxError)) throw readError;
+        const info = await fs.stat(file);
+        // A newly created lock may still be getting its owner record written.
+        // Only reclaim an invalid record left untouched for at least a minute.
+        if (Date.now() - info.mtimeMs < 60_000) throw Error('Amazon sync lock is being initialized. Retry shortly.');
+        await fs.unlink(file);
+        continue;
+      }
       try { process.kill(lock.pid, 0); } catch (failure) { if (failure.code === 'ESRCH') { await fs.unlink(file); continue; } throw failure; }
       throw Error('Another Amazon monitoring operation is already running.');
     }
@@ -64,8 +115,10 @@ export async function monitorState() {
   return { run, dashboardRun, progress: progress ? { ...progress, running } : null, changes, automation,
     history: history.map(item => ({ id: item.id, capturedAt: item.capturedAt, source: item.source, baseline: item.baseline, productCount: item.productCount ?? item.products?.length, changeCount: item.changeCount ?? item.changes?.length ?? 0, unavailableDetails: item.unavailableDetails || [] })) };
 }
-export async function reviewChange(id, status, actor = 'system') {
+export async function reviewChange(id, status, actor = 'system', reason = '') {
   if (!['Reviewed', 'Unreviewed', 'Linked', 'Merged'].includes(status)) throw Error('Invalid review status.');
+  if (['Linked', 'Merged'].includes(status) && (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 1000)) throw Error('Enter a reason of 1 to 1000 characters before confirming the history change.');
+  const changeReason = typeof reason === 'string' ? reason.trim() : '';
   const release = await acquireLock('review');
   try {
     const state = await monitorState();
@@ -82,11 +135,13 @@ export async function reviewChange(id, status, actor = 'system') {
       const sameParents = (a,b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
       if (!product || !sameParents(product.parentAsins, change.current)) throw Error('This change is outdated. Review the latest parent relationship before merging.');
       if (!activeMapping || activeMapping.direction === 'reverse') {
-        activeMapping = { sku: change.sku, asin: change.asin, previousParentAsins: change.previous, currentParentAsins: change.current, changeId: id, mergedAt: now, updatedAt: now, direction: 'forward', sourceCapturedAt: state.run.capturedAt };
-        audit.push({ action: 'Merged', actor, at: now, previousParentAsins: change.previous, currentParentAsins: change.current });
+        activeMapping = { sku: change.sku, asin: change.asin, previousParentAsins: change.previous, currentParentAsins: change.current, changeId: id, mergedAt: now, updatedAt: now, direction: 'forward', sourceCapturedAt: state.run.capturedAt, reason: changeReason };
+        audit.push({ action: 'Merged', actor, at: now, reason: changeReason, previousParentAsins: change.previous, currentParentAsins: change.current });
       }
     }
-    reviews[id] = { status, reviewedAt: status !== 'Unreviewed' ? now : null, linkedAt: ['Linked','Merged'].includes(status) ? reviews[id]?.linkedAt || now : reviews[id]?.linkedAt || null, activeMapping, audit }; await atomicJson(file, reviews);
+    if (status === 'Linked' && status !== (reviews[id]?.status || 'Unreviewed')) audit.push({ action: status, actor, at: now, reason: changeReason, asin: change.asin, sku: change.sku, title: change.title, field: change.field, previous: change.previous, current: change.current, previousParentAsins: change.previousParentAsins || [], currentParentAsins: change.currentParentAsins || [] });
+    if (status !== 'Merged' && status !== 'Linked' && status !== (reviews[id]?.status || 'Unreviewed')) audit.push({ action: status, actor, at: now, asin: change.asin, sku: change.sku, title: change.title, field: change.field, previous: change.previous, current: change.current, previousParentAsins: change.previousParentAsins || [], currentParentAsins: change.currentParentAsins || [] });
+    reviews[id] = { status, reason: ['Linked', 'Merged'].includes(status) ? changeReason : reviews[id]?.reason || '', reviewedAt: status !== 'Unreviewed' ? now : null, linkedAt: ['Linked','Merged'].includes(status) ? reviews[id]?.linkedAt || now : reviews[id]?.linkedAt || null, activeMapping, audit }; await atomicJson(file, reviews);
   } finally { await release(); }
 }
 
@@ -95,14 +150,31 @@ export async function reviewChanges(ids, status, actor = 'system') {
   if (!['Reviewed', 'Unreviewed'].includes(status)) throw Error('Invalid bulk review status.');
   const release = await acquireLock('review');
   try {
-    const state = await monitorState(); const known = new Set(state.changes.map(change => change.id));
+    const state = await monitorState(); const changeById = new Map(state.changes.map(change => [change.id, change])); const known = new Set(changeById.keys());
     if (ids.some(id => !known.has(id))) throw Error('One or more changes no longer exist. Refresh and retry.');
     const file = path.join(monitorRoot(), 'reviews.json'); const reviews = await readJson(file, {}); const now = new Date().toISOString();
     for (const id of new Set(ids)) {
-      const prior = reviews[id] || {};
-      reviews[id] = { ...prior, status, reviewedAt: status === 'Reviewed' ? now : null, linkedAt: prior.linkedAt || null, activeMapping: prior.activeMapping || null, audit: prior.audit || [], actor };
+      const prior = reviews[id] || {}; const change = changeById.get(id); const audit = prior.audit || [];
+      if (change && status !== (prior.status || 'Unreviewed')) audit.push({ action: status, actor, at: now, asin: change.asin, sku: change.sku, title: change.title, field: change.field, previous: change.previous, current: change.current, previousParentAsins: change.previousParentAsins || [], currentParentAsins: change.currentParentAsins || [] });
+      reviews[id] = { ...prior, status, reviewedAt: status === 'Reviewed' ? now : null, linkedAt: prior.linkedAt || null, activeMapping: prior.activeMapping || null, audit, actor };
     }
     await atomicJson(file, reviews);
+  } finally { await release(); }
+}
+
+export async function dismissedNotifications() {
+  return readJson(path.join(monitorRoot(), 'notifications.json'), {});
+}
+
+export async function dismissNotification(id, actor) {
+  if (typeof id !== 'string' || !/^[a-zA-Z0-9:_-]{1,200}$/.test(id)) throw Error('Invalid notification ID.');
+  if (typeof actor !== 'string' || !actor.trim()) throw Error('User identity is required.');
+  const release = await acquireLock('notifications');
+  try {
+    const file = path.join(monitorRoot(), 'notifications.json');
+    const dismissed = await readJson(file, {});
+    dismissed[id] = dismissed[id] || { actor, at: new Date().toISOString() };
+    await atomicJson(file, dismissed);
   } finally { await release(); }
 }
 

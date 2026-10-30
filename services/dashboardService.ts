@@ -15,8 +15,9 @@ function clearAccountCache(accountId: AccountId) {
   const prefix = `${accountId}:`;
   for (const key of responseCache.keys()) if (key.startsWith(prefix)) responseCache.delete(key);
 }
+export const invalidateDashboardCache = (accountId: AccountId = "cdc") => clearAccountCache(accountId);
 
-async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "cdc"): Promise<T> {
+async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "cdc", cacheDurationMs = CACHE_DURATION_MS): Promise<T> {
   const isReadRequest = (init?.method || "GET").toUpperCase() === "GET";
   const key = requestKey(url, accountId);
   const cached = isReadRequest ? responseCache.get(key) : undefined;
@@ -29,7 +30,7 @@ async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "c
     const response = await fetch(url, { ...init, headers: { ...accountHeaders(accountId), ...init?.headers } });
     const body = await response.json() as T & { error?: string };
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
-    if (isReadRequest) responseCache.set(key, { value: body, expiresAt: Date.now() + CACHE_DURATION_MS });
+    if (isReadRequest) responseCache.set(key, { value: body, expiresAt: Date.now() + cacheDurationMs });
     return body;
   })();
 
@@ -41,7 +42,12 @@ async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "c
 export const getDashboardData = (accountId: AccountId = "cdc") => api<any>("/api/dashboard", undefined, accountId);
 export const getTrackingData = (accountId: AccountId = "cdc") => api<any>("/api/tracking", undefined, accountId);
 export const getUploadHistory = (accountId: AccountId = "cdc") => api<any[]>("/api/uploads", undefined, accountId);
+export const getChangeHistory = (accountId: AccountId = "cdc") => api<any>("/api/change-history", undefined, accountId, 0);
 export const getAmazonStatus = () => api<any>("/api/amazon/status");
+export const getAmazonTrackingCatalog = () => api<any>("/api/amazon/tracking-catalog", undefined, "cdc", 60_000);
+export const getAmazonMonitorData = () => api<any>("/api/amazon/monitor", undefined, "cdc", 10_000);
+export const getAmazonProductCatalog = getAmazonTrackingCatalog;
+export const invalidateAmazonMonitorCache = () => responseCache.delete(requestKey("/api/amazon/monitor", "cdc"));
 export async function processExcelUpload(file: File, onProgress?: (step: string, percent: number) => void, accountId: AccountId = "cdc", dateRange?: ImportDateRange) {
   const form = new FormData(); form.append("file", file); if (dateRange?.startDate) form.append("startDate", dateRange.startDate); if (dateRange?.endDate) form.append("endDate", dateRange.endDate); onProgress?.("Starting upload…", 0);
   const result = await new Promise<any>((resolve, reject) => {

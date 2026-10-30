@@ -10,9 +10,11 @@ export function catalogSales(rows) {
     if (amount == null || String(amount).trim() === '' || !Number.isFinite(Number(amount)) || !row.currency || !row.sku || !row.asin) continue;
     const key = JSON.stringify([row.sku, row.asin]);
     const currencies = result.get(key) || {};
-    const total = currencies[row.currency] || { currency: row.currency, amount: 0, units: 0, months: {} };
+    const total = currencies[row.currency] || { currency: row.currency, amount: 0, units: 0, months: {}, lastSaleDate: null };
     total.amount += Number(amount);
     total.units += quantity != null && String(quantity).trim() !== '' && Number.isFinite(Number(quantity)) ? Number(quantity) : 0;
+    const saleDate = String(row['purchase-date'] || '').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(saleDate) && (!total.lastSaleDate || saleDate > total.lastSaleDate)) total.lastSaleDate = saleDate;
     const month = String(row['purchase-date'] || '').slice(0,7);
     if (/^\d{4}-\d{2}$/.test(month)) total.months[month] = (total.months[month] || 0) + Number(amount);
     currencies[row.currency] = total; result.set(key, currencies);

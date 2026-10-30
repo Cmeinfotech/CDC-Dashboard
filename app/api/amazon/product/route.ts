@@ -1,5 +1,7 @@
 import { readAmazonJson } from "../../../../services/amazonDataSecurity.mjs";
 import { accessGuard } from "../../../../services/accessSecurity.mjs";
+import { amazonRequest } from "../../../../services/amazonSpApi";
+import { atomicJson, monitorRoot, readJson } from "../../../../services/amazonMonitorStore.mjs";
 import { join } from "node:path";
 
 const marketplace = "ATVPDKIKX0DER";
@@ -46,6 +48,30 @@ export async function GET(request: Request) {
     if (!old || image.width * image.height > old.width * old.height) imageMap.set(image.variant, image);
   }
   const listings = (catalog?.rows || []).filter((row: any) => row.asin1 === asin).map((row: any) => ({ sku: row['seller-sku'], price: row.price, quantity: row.quantity, fulfillment: row['fulfillment-channel'], status: row.status }));
+  let reviewTrends: any = null;
+  let reviewTrendsUnavailable: string | null = null;
+  let reviewTrendsPulledAt: string | null = null;
+  const reviewCacheFile = join(monitorRoot(), 'review-trends', `${asin}.json`);
+  try {
+    const cached = await readJson(reviewCacheFile, null);
+    const cacheAge = cached?.pulledAt ? Date.now() - new Date(cached.pulledAt).getTime() : Infinity;
+    if (cached && cacheAge >= 0 && cacheAge < (cached.unavailable ? 60 : 7 * 24 * 60) * 60_000) {
+      reviewTrends = cached.data || null; reviewTrendsUnavailable = cached.unavailable || null; reviewTrendsPulledAt = cached.pulledAt;
+    } else {
+      const response = await amazonRequest<any>(`/customerFeedback/2024-06-01/items/${encodeURIComponent(asin)}/reviews/trends?marketplaceId=${encodeURIComponent(marketplace)}`);
+      reviewTrends = response.data;
+      reviewTrendsPulledAt = new Date().toISOString();
+      if (reviewTrends) await atomicJson(reviewCacheFile, { pulledAt: reviewTrendsPulledAt, data: reviewTrends });
+      else { reviewTrendsUnavailable = 'Amazon has no review trend data for this ASIN yet.'; await atomicJson(reviewCacheFile, { pulledAt: reviewTrendsPulledAt, unavailable: reviewTrendsUnavailable }); }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Amazon review insights are unavailable.';
+    reviewTrendsUnavailable = /403|Access Denied|Unauthorized/i.test(message)
+      ? 'Amazon review insights require the Selling Partner Insights role to be enabled for this app.'
+      : 'Amazon review trends could not be loaded right now.';
+    reviewTrendsPulledAt = new Date().toISOString();
+    try { await atomicJson(reviewCacheFile, { pulledAt: reviewTrendsPulledAt, unavailable: reviewTrendsUnavailable }); } catch { /* Keep product details available if optional trend caching fails. */ }
+  }
   return Response.json({ asin, marketplaceId: marketplace, title: summary.itemName || get("item_name"), brand: summary.brand || get("brand"),
     description: get("product_description"), bullets: Array.isArray(attributes.bullet_point) ? (attributes.bullet_point as unknown[]).map(text).filter(Boolean) : [],
     images: [...imageMap.values()].sort((a, b) => a.variant === "MAIN" ? -1 : b.variant === "MAIN" ? 1 : a.variant.localeCompare(b.variant)),
@@ -53,6 +79,7 @@ export async function GET(request: Request) {
     identifiers: item.identifiers?.filter((row: any) => row.marketplaceId === marketplace) || [], dimensions: item.dimensions?.filter((row: any) => row.marketplaceId === marketplace) || [],
     classifications: item.classifications?.filter((row: any) => row.marketplaceId === marketplace) || [], salesRanks: item.salesRanks?.filter((row: any) => row.marketplaceId === marketplace) || [],
     relationships: item.relationships?.filter((row: any) => row.marketplaceId === marketplace) || [], productTypes: item.productTypes?.filter((row: any) => row.marketplaceId === marketplace) || [],
-    listings, sellerListing: listings.length > 0, fullDatasetsPulled: Boolean(full?.items?.some((row: any) => row.asin === asin) || reference?.item?.asin === asin), pulledAt: full?.items?.some((row: any) => row.asin === asin) ? full.pulledAt : reference?.item?.asin === asin ? reference.pulledAt : null,
+    listings, sellerListing: listings.length > 0, reviewTrends, reviewTrendsUnavailable, reviewTrendsPulledAt,
+    fullDatasetsPulled: Boolean(full?.items?.some((row: any) => row.asin === asin) || reference?.item?.asin === asin), pulledAt: full?.items?.some((row: any) => row.asin === asin) ? full.pulledAt : reference?.item?.asin === asin ? reference.pulledAt : null,
   }, { headers: { "Cache-Control": "no-store" } });
 }

@@ -1,14 +1,17 @@
 "use client";
 
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ProductReviewCards from "./ProductReviewCards";
+import ProductPerformanceSummary from "./ProductPerformanceSummary";
+import { productPerformanceDetails, matchesPerformanceFilter, type PerformanceFilter, type PerformanceCatalog } from "../utils/productPerformance";
 import {
   Area,
   AreaChart,
   Bar,
-  BarChart,
   CartesianGrid,
+  Cell,
+  ComposedChart,
   Line,
-  LineChart,
   ResponsiveContainer,
   Tooltip as ChartTooltip,
   XAxis,
@@ -21,6 +24,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   BarChart3,
+  Bell,
   Boxes,
   CalendarDays,
   Check,
@@ -44,6 +48,7 @@ import {
   PackageSearch,
   PanelLeftClose,
   PanelLeftOpen,
+  Receipt,
   Search,
   ShieldCheck,
   UploadCloud,
@@ -54,17 +59,27 @@ import {
 import {
   getDashboardData,
   getTrackingData,
-  getUploadHistory,
   getAmazonStatus,
+  getAmazonTrackingCatalog,
+  getAmazonMonitorData,
+  getAmazonProductCatalog,
+  getChangeHistory,
+  invalidateDashboardCache,
   mergeAllAsinChanges,
   mergeAsinChange,
   processExcelUpload,
 } from "../services/dashboardService";
 import AmazonMonitor from "./AmazonMonitor";
 import AmazonAccountHealth from "./AmazonAccountHealth";
+import AmazonProductCatalog from "./AmazonProductCatalog";
+import DashboardNotifications, { useDashboardNotifications } from "./DashboardNotifications";
+import AdminUsers from "./AdminUsers";
+import ProductThumbnail from "./ProductThumbnail";
+import DashboardLogoutButton from "./DashboardLogoutButton";
+import { GlobalDateRangeFilter, getAvailableDateRange, useGlobalDateRange } from "./GlobalDateRange";
 import type { Product } from "../mocks/dashboardData";
 
-type Page = "accountHealth" | "monitor" | "analytics" | "allSales" | "tracking" | "attributes" | "upload";
+type Page = "notifications" | "users" | "accountHealth" | "analytics" | "productPerformance" | "productCatalog" | "allSales" | "orders" | "tracking" | "attributes" | "changeHistory";
 type AccountId = "cdc" | "nana-jewellers";
 type Toast = {
   id: number;
@@ -79,17 +94,21 @@ const money = (value: number) =>
     currency: "USD",
     maximumFractionDigits: 0,
   }).format(value);
-const compact = (value: number) =>
-  new Intl.NumberFormat("en-US", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
+const elapsedSince = (timestamp: string, now: number) => {
+  const minutes = Math.floor(Math.abs(now - new Date(timestamp).getTime()) / 60_000);
+  if (!Number.isFinite(minutes)) return "";
+  if (minutes < 1) return "just now";
+  const value = minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min${minutes === 1 ? "" : "s"}` : minutes < 1440 ? `${Math.floor(minutes / 60)} hr${Math.floor(minutes / 60) === 1 ? "" : "s"}` : `${Math.floor(minutes / 1440)} day${Math.floor(minutes / 1440) === 1 ? "" : "s"}`;
+  return now >= new Date(timestamp).getTime() ? `${value} ago` : `in ${value}`;
+};
 
 const NAV = [
-  { id: "accountHealth" as Page, label: "Amazon Account Health", icon: ShieldCheck },
-  { id: "monitor" as Page, label: "Amazon Change Monitor", icon: Activity },
   { id: "analytics" as Page, label: "Sales Analytics", icon: BarChart3 },
+  { id: "users" as Page, label: "User Management", icon: Users },
+  { id: "productPerformance" as Page, label: "Product Performance", icon: Activity },
+  { id: "productCatalog" as Page, label: "Product Catalogue", icon: Boxes },
   { id: "allSales" as Page, label: "All Product Sales", icon: Layers3 },
+  { id: "orders" as Page, label: "Orders", icon: Receipt },
   {
     id: "tracking" as Page,
     label: "Product / ASIN Tracking",
@@ -100,7 +119,8 @@ const NAV = [
     label: "Attribute Changes",
     icon: FileCheck2,
   },
-  { id: "upload" as Page, label: "Upload Data", icon: UploadCloud },
+  { id: "accountHealth" as Page, label: "Amazon Account Health", icon: ShieldCheck },
+  { id: "changeHistory" as Page, label: "Change History", icon: History },
 ];
 
 const ACCOUNTS: Record<AccountId, { name: string; shortName: string; description: string; initials: string }> = {
@@ -200,149 +220,62 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
-function ProductScopeSelect({
-  products,
-  value,
-  onChange,
-}: {
-  products: Product[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [search, setSearch] = useState("");
-  const root = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const close = (event: MouseEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, []);
-  const selectedParents = value.startsWith("MULTI:")
-    ? value.slice(6).split(",").filter(Boolean)
-    : value === "All products"
-      ? []
-      : [value];
-  const current =
-    selectedParents.length > 1
-      ? {
-          name: `${selectedParents.length} products selected`,
-          parent: "Multiple ASINs",
-        }
-      : selectedParents.length === 1
-        ? products.find((p) => p.parent === selectedParents[0])
-        : null;
-  const filtered = products.filter((p) =>
-    `${p.name} ${p.parent} ${p.children.map((c) => c.asin).join(" ")}`
-      .toLowerCase()
-      .includes(search.trim().toLowerCase()),
-  );
-  const choose = (next: string) => {
-    if (next === "All products") {
-      onChange(next);
-      setOpen(false);
-      setSearch("");
-      return;
-    }
-    const nextSet = new Set(selectedParents);
-    nextSet.has(next) ? nextSet.delete(next) : nextSet.add(next);
-    const values = [...nextSet];
-    onChange(
-      values.length === 0
-        ? "All products"
-        : values.length === 1
-          ? values[0]
-          : `MULTI:${values.join(",")}`,
-    );
-  };
-  return (
-    <div className="product-select" ref={root}>
-      <button
-        type="button"
-        className={`product-select-trigger ${open ? "open" : ""}`}
-        onClick={() => setOpen((x) => !x)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <span className="product-select-icon">
-          <Layers3 size={16} />
-        </span>
-        <span className="product-select-value">
-          <b>{current?.name || "All products"}</b>
-          <small>
-            {current?.parent || `${products.length} products available`}
-          </small>
-        </span>
-        <ChevronDown size={16} />
-      </button>
-      {open && (
-        <div className="product-select-menu">
-          <div className="product-select-search">
-            <Search size={15} />
-            <input
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search product or Parent ASIN…"
-              onKeyDown={(e) => {
-                if (e.key === "Escape") setOpen(false);
-              }}
-            />
-            <kbd>{filtered.length}</kbd>
-          </div>
-          <div className="product-select-list" role="listbox">
-            <button
-              className={value === "All products" ? "selected" : ""}
-              onClick={() => choose("All products")}
-            >
-              <span className="scope-all">
-                <Layers3 size={15} />
-              </span>
-              <span>
-                <b>All products</b>
-                <small>Combined portfolio performance</small>
-              </span>
-              {value === "All products" && <Check size={16} />}
-            </button>
-            {filtered.map((p, index) => (
-              <button
-                key={p.parent}
-                className={value === p.parent ? "selected" : ""}
-                onClick={() => choose(p.parent)}
-              >
-                <span className={`scope-product s${index % 4}`}>
-                  <Boxes size={15} />
-                </span>
-                <span>
-                  <b>{p.name}</b>
-                  <small>
-                    {p.parent} · {p.children.length} child ASINs
-                  </small>
-                </span>
-                {value === p.parent && <Check size={16} />}
-              </button>
-            ))}
-            {filtered.length === 0 && (
-              <div className="product-select-empty">
-                <Search size={18} />
-                <b>No products found</b>
-                <span>Try another name or Parent ASIN.</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+const auditValue = (value: unknown): string => {
+  if (value == null || value === "") return "Empty";
+  if (typeof value === "string") {
+    try { const parsed = JSON.parse(value); if (parsed && typeof parsed === "object") return auditValue(parsed); } catch { return value; }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => item && typeof item === "object" && "value" in item ? String((item as any).value ?? "") : auditValue(item)).filter(Boolean).join(" · ") || "Empty";
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, item]) => `${key.replace(/_/g, " ")}: ${auditValue(item)}`).join(" · ");
+  return String(value);
+};
+
+function ChangeHistoryView({ account }: { account: AccountId }) {
+  const [events, setEvents] = useState<any[]>([]);
+  const [ready, setReady] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => { let active = true; setLoading(true); getChangeHistory(account).then((result) => { if (active) { setEvents(result.events || []); setReady(result.databaseReady !== false); } }).catch(() => { if (active) setError("Change history could not be loaded. Refresh and retry."); }).finally(() => { if (active) setLoading(false); }); return () => { active = false; }; }, [account]);
+  if (error) return <div className="card" role="alert">{error}</div>;
+  if (loading) return <section className="change-history-panel change-history-loading"><div className="change-history-toolbar"><div className="skeleton"/><div className="skeleton"/></div>{[1, 2, 3].map(row => <div className="change-history-loading-row" key={row}><span className="skeleton"/><span className="skeleton"/><span className="skeleton"/><span className="skeleton"/></div>)}</section>;
+  return <section className="change-history-panel">
+    <div className="change-history-toolbar"><div className="change-history-mark"><History size={18}/></div><div className="change-history-count"><b>{events.length.toLocaleString()}</b><span>{events.length === 1 ? "recorded change" : "recorded changes"}</span></div><span className="change-history-latest">Newest activity first</span></div>
+    {!ready ? <p className="empty-note">Change history requires a database connection.</p> : events.length ? <div className="change-history-table-wrap"><table className="change-history-table"><colgroup><col className="history-col-when"/><col className="history-col-user"/><col className="history-col-action"/><col/></colgroup><thead><tr><th>When</th><th>User</th><th>Action</th><th>Change details</th></tr></thead><tbody>{events.map((event) => {
+      const details = event.details || {};
+      const timestamp = event.createdAt ? new Date(event.createdAt.endsWith?.("Z") ? event.createdAt : `${event.createdAt.replace(" ", "T")}Z`) : null;
+      const isParentChange = Boolean(details.previousParentAsins);
+      const isAsinChange = Boolean(details.previousAsin);
+      const hasBeforeAfter = Boolean(details.field || isParentChange || isAsinChange || details.changes?.length);
+      const title = details.product || details.file || event.summary;
+      return <tr key={event.id}>
+        <td className="history-when">{timestamp && Number.isFinite(timestamp.getTime()) ? <><time>{timestamp.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" })}</time><small>{timestamp.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</small></> : "—"}</td>
+        <td><span className="history-user"><span className="history-user-avatar">{String(event.actor || "?").trim().slice(0, 1).toUpperCase()}</span><b>{event.actor || "User not recorded"}</b></span></td>
+        <td><span className={`history-action history-action-${String(event.action || "").toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}>{event.action}</span></td>
+        <td className="history-detail-cell"><div className="history-detail-title">{title}</div>{(details.asin || details.sku || details.reportType || details.rows != null) && <div className="history-detail-meta">{details.asin && <code>ASIN {details.asin}</code>}{details.sku && <code>SKU {details.sku}</code>}{details.reportType && <span>{String(details.reportType).toUpperCase()}</span>}{details.rows != null && <span>{Number(details.rows).toLocaleString()} rows</span>}</div>}
+          {hasBeforeAfter && <div className="history-change-summary">{details.field && <b>{String(details.field).replace(/^(attributes|listing)\./, "").replace(/_/g, " ")}</b>}{(details.field || isAsinChange || isParentChange) && <div className="history-transition"><span>{isParentChange ? (details.previousParentAsins || []).join(", ") || "No parent" : isAsinChange ? details.previousAsin : auditValue(details.previous)}</span><ArrowRight size={14}/><span>{isParentChange ? (details.currentParentAsins || []).join(", ") || "No parent" : isAsinChange ? details.currentAsin : auditValue(details.current)}</span></div>}</div>}
+          {details.changes?.length > 0 && <details className="history-more"><summary>View {details.changes.length} detected catalog changes</summary><ul>{details.changes.map((change: any, index: number) => <li key={`${change.sku}-${index}`}><b>{change.product || change.sku || change.kind}</b>{change.previousAsin && <span>ASIN {change.previousAsin} → {change.currentAsin}</span>}{change.fields?.map((field: any) => <span key={field.field}>{field.field}: {auditValue(field.previous)} → {auditValue(field.current)}</span>)}</li>)}</ul></details>}
+        </td>
+      </tr>;
+    })}</tbody></table></div> : <div className="change-history-empty"><History size={25}/><b>No changes recorded yet</b><span>Successful uploads, reviews, and ASIN merges will appear here.</span></div>}
+  </section>;
 }
 
 export default function DashboardApp() {
-  const [page, setPage] = useState<Page>("monitor");
+  const notifications = useDashboardNotifications();
+  const notificationCount = notifications.state?.notices.length ?? 0;
+  const { selectedProductParents, setSelectedProductParents } = useGlobalDateRange();
+  const [page, setPage] = useState<Page>("analytics");
   const [visitedPages, setVisitedPages] = useState<Set<Page>>(
-    () => new Set<Page>(["monitor"]),
+    () => new Set<Page>(["analytics"]),
   );
   const [account, setAccount] = useState<AccountId>("cdc");
+  const [amazonLastRefresh, setAmazonLastRefresh] = useState<string | null>(null);
+  const [amazonSyncStatus, setAmazonSyncStatus] = useState<string | null>(null);
+  const [amazonStatusChecked, setAmazonStatusChecked] = useState(false);
+  const [amazonStatusError, setAmazonStatusError] = useState("");
+  const [amazonSyncInterval, setAmazonSyncInterval] = useState(30);
+  const [clockNow, setClockNow] = useState(() => Date.now());
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -350,27 +283,38 @@ export default function DashboardApp() {
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [data, setData] = useState<any>(null);
   const [tracking, setTracking] = useState<any>(null);
-  const [uploads, setUploads] = useState<any[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [canManageUsers, setCanManageUsers] = useState(false);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    let active = true;
+    fetch("/api/admin/users", { cache: "no-store" }).then(async response => response.ok ? response.json() : null).then(result => { if (active) setCanManageUsers(result?.canCreate === true || result?.canManage === true); }).catch(() => { if (active) setCanManageUsers(false); });
+    return () => { active = false; };
+  }, []);
   const [globalQuery, setGlobalQuery] = useState("");
-  const [analyticsScope, setAnalyticsScope] = useState("All products");
 
   const refreshData = async (accountId = account) => {
     try {
       // Keep the initial request light. ASIN history and catalog-change data
       // are loaded only when a tracking page is opened.
-      const [dashboard, u] = await Promise.all([
-        getDashboardData(accountId),
-        getUploadHistory(accountId),
-      ]);
+      const dashboard = await getDashboardData(accountId);
       setData(dashboard);
       setDashboardError(dashboard.databaseReady === false ? "Sales data is unavailable. Check the database connection or upload source sheets." : "");
-      setUploads(u);
-    } catch {
-      setDashboardError("Sales data could not be loaded. Check the database connection and retry. Missing data is not a zero sales result.");
-      setData({ products: [], monthlySales: [], dailySales: [], metrics: {}, granularity: "monthly", salesRecords: [], catalogRecords: [], orderRecords: [], databaseReady: false });
+      if (accountId === "cdc") {
+        // Warm the heavier catalog and monitor screens after the main dashboard
+        // is visible so first navigation is ready without delaying startup.
+        window.setTimeout(() => {
+          void getAmazonProductCatalog().catch(() => {});
+          void getAmazonMonitorData().catch(() => {});
+        }, 1200);
+      }
+    } catch (error) {
+      setDashboardError(`${error instanceof Error ? error.message : "Sales data could not be loaded."} Missing data is not a zero sales result.`);
+      setData({ products: [], monthlySales: [], dailySales: [], dailySalesRecords: [], metrics: {}, granularity: "monthly", salesRecords: [], catalogRecords: [], orderRecords: [], databaseReady: false });
       setTracking({ products: [], monthlySales: [], dailySales: [], metrics: {}, childMetrics: {}, asinChanges: [], asinHistory: [], missingAsins: [], attributeChanges: [], salesRecords: [], catalogRecords: [], orderRecords: [] });
-      setUploads([]);
     } finally {
       setLoading(false);
     }
@@ -378,7 +322,8 @@ export default function DashboardApp() {
   useEffect(() => {
     setLoading(true);
     setTracking(null);
-    const initialPage: Page = account === "cdc" ? new URLSearchParams(window.location.search).get("page") === "tracking" ? "tracking" : "monitor" : "analytics";
+    const requestedPage = new URLSearchParams(window.location.search).get("page");
+    const initialPage: Page = requestedPage === "notifications" ? "notifications" : requestedPage === "users" ? "users" : account === "cdc" ? requestedPage === "accountHealth" ? "accountHealth" : requestedPage === "attributes" ? "attributes" : requestedPage === "allSales" ? "allSales" : requestedPage === "orders" ? "orders" : requestedPage === "tracking" ? "tracking" : requestedPage === "productPerformance" ? "productPerformance" : requestedPage === "productCatalog" ? "productCatalog" : "analytics" : "analytics";
     setVisitedPages(new Set<Page>([initialPage]));
     setPage(initialPage);
     refreshData();
@@ -389,13 +334,55 @@ export default function DashboardApp() {
     window.addEventListener("cdc-data-updated", refresh);
     return () => window.removeEventListener("cdc-data-updated", refresh);
   }, [account]);
-  const needsTracking =
-    page === "allSales" || (account !== "cdc" && (page === "tracking" || page === "attributes"));
+  useEffect(() => {
+    if (account !== "cdc") return;
+    let active = true;
+    let inFlight = false;
+    let initialized = false;
+    let lastCompletedAt: string | null = null;
+    let lastCatalogAt: string | null = null;
+    const pollForAmazonPull = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const response = await fetch("/api/amazon/sync-state", { cache: "no-store", signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) throw new Error("Pull status could not be loaded.");
+        const state = await response.json();
+        if (!active) return;
+        setAmazonStatusChecked(true);
+        setAmazonStatusError(state.statusWarning || "");
+        if (Number.isInteger(state.intervalMinutes) && state.intervalMinutes >= 5) setAmazonSyncInterval(state.intervalMinutes);
+        const completedAt = state.completedAt || null;
+        setAmazonSyncStatus(state.syncStatus || null);
+        if (completedAt) { setAmazonLastRefresh(completedAt); setClockNow(Date.now()); }
+        const updateAt = state.lastFinishedAt || completedAt;
+        const catalogChanged = state.capturedAt && state.capturedAt !== lastCatalogAt;
+        if (initialized && (catalogChanged || (["complete", "partial"].includes(state.syncStatus) && updateAt && updateAt !== lastCompletedAt))) {
+          invalidateDashboardCache("cdc");
+          window.dispatchEvent(new Event("cdc-data-updated"));
+        }
+        lastCompletedAt = updateAt;
+        lastCatalogAt = state.capturedAt || null;
+        initialized = true;
+      } catch {
+        if (active) { setAmazonStatusChecked(true); setAmazonStatusError("Pull status unavailable; retrying automatically."); }
+      } finally {
+        inFlight = false;
+      }
+    };
+    void pollForAmazonPull();
+    const timer = window.setInterval(() => void pollForAmazonPull(), 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [account]);
+  const needsTracking = account !== "cdc" && (page === "tracking" || page === "attributes");
   useEffect(() => {
     // Do not skip the request solely because the loading flag is already set.
     // React development mode intentionally re-runs effects; the first run is
     // cleaned up, and the second must attach to the shared pending request.
-    if (tracking || loading) return;
+    if (loading || tracking || (account === "cdc" && !globalQuery.trim())) return;
     let active = true;
     const timer = window.setTimeout(() => {
       setTrackingLoading(true);
@@ -414,13 +401,17 @@ export default function DashboardApp() {
         .finally(() => {
           if (active) setTrackingLoading(false);
         });
-    }, needsTracking ? 0 : 800);
+    }, needsTracking || account === "cdc" ? 0 : 800);
     return () => {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [account, loading, needsTracking, tracking]);
+  }, [account, globalQuery, loading, needsTracking, tracking]);
   const openPage = useCallback((nextPage: Page) => {
+    // Start page-specific requests as soon as navigation is likely. Hover/focus
+    // handlers below usually finish these before the click is released.
+    if (account === "cdc" && (nextPage === "productCatalog" || nextPage === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
+    if (account === "cdc" && (nextPage === "tracking" || nextPage === "attributes")) void getAmazonMonitorData().catch(() => {});
     setVisitedPages((current) => {
       if (current.has(nextPage)) return current;
       const next = new Set(current);
@@ -429,12 +420,20 @@ export default function DashboardApp() {
     });
     setPage(nextPage);
     setMobileNav(false);
-  }, []);
+  }, [account]);
+  useEffect(() => {
+    const handlePageRequest = (event: Event) => {
+      const requested = (event as CustomEvent).detail;
+      if (requested === "productCatalog" || requested === "orders") openPage(requested);
+    };
+    window.addEventListener("dashboard-open-page", handlePageRequest);
+    return () => window.removeEventListener("dashboard-open-page", handlePageRequest);
+  }, [openPage]);
   const changeAccount = (accountId: AccountId) => {
     if (accountId === account) return;
     setAccount(accountId);
     setGlobalQuery("");
-    setAnalyticsScope("All products");
+    setSelectedProductParents([]);
     openPage("analytics");
     notify("Account switched", `${ACCOUNTS[accountId].name} workspace is now open.`);
   };
@@ -448,12 +447,16 @@ export default function DashboardApp() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
   }, []);
   const titles = {
+    notifications: ["Notifications", "Product, price, stock, and account-health alerts in one place."],
+    users: ["User Management", "Create dashboard users and assign their access."],
     accountHealth: ["Amazon Account Health", "View account rating, performance metrics and policy violations. Export the saved report to Excel."],
-    monitor: ["Amazon Change Monitor", "Detect and review changes between complete Amazon product pulls."],
+    changeHistory: ["Change History", "See who made each recorded change and what changed."],
     analytics: [
       "Sales Analytics",
       "Monitor revenue, product velocity, and catalog performance.",
     ],
+    productPerformance: ["Product Performance", "Compare sales, orders, units, and growth for each parent product."],
+    productCatalog: ["Product Catalogue", "Browse parent and child ASIN relationships and listing details."],
     tracking: [
       "Product / ASIN Tracking",
       "Preserve product continuity through every catalog change.",
@@ -466,10 +469,7 @@ export default function DashboardApp() {
       "All Product Sales",
       "Review every imported Parent and Child ASIN sales record.",
     ],
-    upload: [
-      "Upload Data",
-      "Validate new reports and detect catalog changes before they land.",
-    ],
+    orders: ["Orders", "Review order date, status, product, quantity, and item price."],
   };
   const mergedAliasesForProduct = (product: Product) => {
     const productName = product.name.trim().toLowerCase();
@@ -565,7 +565,7 @@ export default function DashboardApp() {
       setGlobalQuery("");
       return;
     }
-    setAnalyticsScope(parent);
+    setSelectedProductParents([parent]);
     openPage("analytics");
     setGlobalQuery("");
   };
@@ -573,6 +573,7 @@ export default function DashboardApp() {
   return (
     <div className="app-shell">
       <aside
+        id="dashboard-sidebar"
         className={`sidebar ${collapsed ? "collapsed" : ""} ${mobileNav ? "mobile-open" : ""}`}
       >
         <div className="side-top">
@@ -590,11 +591,20 @@ export default function DashboardApp() {
           </button>
         </div>
         <nav>
-          {account === "cdc" && <a href="/amazon" style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", color: "inherit", textDecoration: "none" }}><Activity size={19} />{!collapsed && <span>Amazon Live Data</span>}</a>}
-          {NAV.filter(item => account === "cdc" || !["monitor", "accountHealth"].includes(item.id)).map((item) => (
+          {NAV.filter(item => (account === "cdc" || item.id !== "accountHealth") && (item.id !== "users" || canManageUsers)).map((item) => (
             <button
               key={item.id}
               className={page === item.id ? "active" : ""}
+              aria-label={item.label}
+              title={collapsed ? item.label : undefined}
+              onMouseEnter={() => {
+                if (account === "cdc" && (item.id === "productCatalog" || item.id === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
+                if (account === "cdc" && (item.id === "tracking" || item.id === "attributes")) void getAmazonMonitorData().catch(() => {});
+              }}
+              onFocus={() => {
+                if (account === "cdc" && (item.id === "productCatalog" || item.id === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
+                if (account === "cdc" && (item.id === "tracking" || item.id === "attributes")) void getAmazonMonitorData().catch(() => {});
+              }}
               onClick={() => {
                 openPage(item.id);
               }}
@@ -613,6 +623,9 @@ export default function DashboardApp() {
           <button
             className="icon-btn mobile-menu"
             onClick={() => setMobileNav(!mobileNav)}
+            aria-label={mobileNav ? "Close navigation menu" : "Open navigation menu"}
+            aria-expanded={mobileNav}
+            aria-controls="dashboard-sidebar"
           >
             <Menu size={20} />
           </button>
@@ -622,11 +635,13 @@ export default function DashboardApp() {
               value={globalQuery}
               onChange={(e) => setGlobalQuery(e.target.value)}
               placeholder="Search ASIN, SKU or product title…"
+              aria-label="Search ASIN, SKU or product title"
             />
             {globalQuery && (
               <button
                 className="search-clear"
                 onClick={() => setGlobalQuery("")}
+                aria-label="Clear search"
               >
                 <X />
               </button>
@@ -670,25 +685,45 @@ export default function DashboardApp() {
             )}
           </div>
           <nav className="topbar-nav" aria-label="Workspace actions">
-            <span className="topbar-live-status"><i />Amazon data</span>
-            <button className="topbar-pull" onClick={async () => { try { const response = await fetch('/api/amazon/sync', { method: 'POST' }); const body = await response.json(); if (!response.ok) throw Error(body.error || 'Could not start Amazon pull.'); notify('Amazon pull started', 'Catalog, ASIN tracking, attribute changes and Amazon order sales will update after the pull completes.'); } catch (error) { notify('Amazon pull failed', error instanceof Error ? error.message : 'Could not start Amazon pull.', 'warning'); } }}>Pull now</button>
-            <button className="topbar-user" aria-label="Current workspace: CDC" onClick={() => notify("CDC workspace", "Use the workspace menu at the bottom of the sidebar to switch accounts.")}>
-              <span>CDC</span><b>CDC</b><ChevronDown size={15} />
+            <span
+              className="topbar-live-status"
+              title={amazonLastRefresh ? `Last completed Amazon data pull: ${new Date(amazonLastRefresh).toLocaleString()}. Reloading this page does not start a new Amazon pull.` : "No completed Amazon sync yet"}
+            >
+              <Clock3 size={14} />
+              {amazonLastRefresh
+                ? `Last Amazon pull · ${new Date(amazonLastRefresh).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", hour12: true })} · ${elapsedSince(amazonLastRefresh, clockNow)}`
+                : !amazonStatusChecked ? "Checking Amazon pull status…" : amazonStatusError ? "Amazon pull status unavailable" : "No completed Amazon pull yet"}
+              {amazonLastRefresh && amazonStatusError ? " · Status needs attention" : ""}
+              {` · Every ${amazonSyncInterval} min`}
+              {amazonSyncStatus === "running" ? " · Sync running" : amazonSyncStatus === "partial" ? " · Some pulls failed" : amazonSyncStatus === "failed" ? " · Sync failed" : amazonSyncStatus === "interrupted" ? " · Sync interrupted" : ""}
+            </span>
+            <button
+              type="button"
+              className={`topbar-notifications ${page === "notifications" ? "active" : ""}`}
+              aria-label={`Open notifications, ${notificationCount} active alerts`}
+              title="Notifications"
+              onClick={() => openPage("notifications")}
+            >
+              <Bell size={17} />
+              {notificationCount > 0 && <span className="topbar-notification-badge" aria-hidden="true">{notificationCount > 99 ? "99+" : notificationCount}</span>}
             </button>
+            <DashboardLogoutButton />
           </nav>
         </header>
         <div className="page-wrap">
           <div className="breadcrumbs">
             Workspace <ChevronRight size={13} /> <span>{titles[page][0]}</span>
           </div>
+          <GlobalDateRangeFilter products={data?.products || []} defaultRange={getAvailableDateRange(data)} />
           <div className="page-heading">
             <div>
               <h1>{titles[page][0]}</h1>
               <p>{account === "cdc" && page === "tracking" ? "Track ASIN replacements, missing listings and parent-child changes from Amazon." : account === "cdc" && page === "attributes" ? "Compare product details between completed Amazon pulls." : titles[page][1]}</p>
             </div>
-            {account === 'cdc' && ['monitor', 'tracking', 'attributes'].includes(page) && <div id="amazon-export-action" />}
+            {account === 'cdc' && ['tracking', 'attributes'].includes(page) && <div id="amazon-export-action" />}
+            {account === 'cdc' && page === 'productCatalog' && <div id="product-catalog-actions" />}
           </div>
-          {account === "cdc" && page === "accountHealth" ? <AmazonAccountHealth /> : account === "cdc" && (page === "monitor" || page === "tracking" || page === "attributes") ? <AmazonMonitor key={page} scope={page === "tracking" ? "tracking" : page === "attributes" ? "attributes" : "all"} /> : loading || (needsTracking && (trackingLoading || !tracking)) ? (
+            {page === "notifications" ? <DashboardNotifications model={notifications} /> : page === "users" ? <AdminUsers /> : account === "cdc" && page === "accountHealth" ? <AmazonAccountHealth /> : account === "cdc" && (page === "tracking" || page === "attributes") ? <AmazonMonitor key={page} scope={page === "tracking" ? "tracking" : "attributes"} selectedProductParents={selectedProductParents} /> : page === "changeHistory" ? <ChangeHistoryView account={account} /> : loading || (needsTracking && (trackingLoading || !tracking)) ? (
             <DashboardSkeleton />
           ) : dashboardError ? (
             <div role="alert" className="card"><p>{dashboardError}</p><button onClick={() => refreshData()}>Retry loading data</button></div>
@@ -696,12 +731,27 @@ export default function DashboardApp() {
             <>
               {visitedPages.has("analytics") && (
                 <div hidden={page !== "analytics"}>
-                  <MemoAnalyticsPage key={account} data={data} notify={notify} initialScope={analyticsScope} />
+                  <MemoAnalyticsPage key={account} data={data} notify={notify} />
                 </div>
               )}
-              {tracking && visitedPages.has("allSales") && (
+              {visitedPages.has("productPerformance") && (
+                <div hidden={page !== "productPerformance"}>
+                  <MemoAnalyticsPage key={`${account}-performance`} data={data} notify={notify} performanceOnly />
+                </div>
+              )}
+              {visitedPages.has("productCatalog") && (
+                <div hidden={page !== "productCatalog"}>
+                  <AmazonProductCatalog key={account} active={page === "productCatalog"} />
+                </div>
+              )}
+              {visitedPages.has("allSales") && (
                 <div hidden={page !== "allSales"}>
-                  <MemoAllProductSalesPage key={account} data={data} tracking={tracking} notify={notify} />
+                  <MemoAllProductSalesPage key={account} data={data} notify={notify} tracking={tracking || {}} />
+                </div>
+              )}
+              {visitedPages.has("orders") && (
+                <div hidden={page !== "orders"}>
+                  <MemoAllProductSalesPage key={`${account}-orders`} data={data} notify={notify} ordersOnly />
                 </div>
               )}
               {tracking && visitedPages.has("tracking") && (
@@ -712,11 +762,6 @@ export default function DashboardApp() {
               {tracking && visitedPages.has("attributes") && (
                 <div hidden={page !== "attributes"}>
                   <MemoAttributeChangesView key={account} rows={tracking.attributeChanges || []} notify={notify} />
-                </div>
-              )}
-              {visitedPages.has("upload") && (
-                <div hidden={page !== "upload"}>
-                  <UploadPage key={account} uploads={uploads} notify={notify} account={account} goTracking={() => openPage("tracking")} />
                 </div>
               )}
             </>
@@ -738,24 +783,60 @@ export default function DashboardApp() {
 function AnalyticsPage({
   data,
   notify,
-  initialScope,
+  performanceOnly = false,
 }: {
   data: any;
   notify: (a: string, b: string) => void;
-  initialScope: string;
+  performanceOnly?: boolean;
 }) {
-  const [scope, setScope] = useState(initialScope);
-  useEffect(() => setScope(initialScope), [initialScope]);
-  const [period, setPeriod] = useState("Monthly");
+  const { startDate: globalStartDate, endDate: globalEndDate, selectedProductParents } = useGlobalDateRange();
+  const scope = selectedProductParents.length === 0 ? "All products" : selectedProductParents.length === 1 ? selectedProductParents[0] : `MULTI:${selectedProductParents.join(",")}`;
+  // Short dashboard ranges need day-level chart buckets. Filtering monthly
+  // totals by overlap makes Today/Yesterday/This week all display the whole
+  // current month (often as a single Oct 26 point), which looks like the date
+  // filter was ignored. Keep longer ranges at monthly granularity.
+  const rangeLengthDays = globalStartDate && globalEndDate
+    ? Math.floor((Date.parse(`${globalEndDate}T00:00:00Z`) - Date.parse(`${globalStartDate}T00:00:00Z`)) / 86400000) + 1
+    : Infinity;
+  const period = globalStartDate && globalEndDate && rangeLengthDays <= 31 && (data.dailySales || []).length
+    ? "Daily"
+    : "Monthly";
+  const growthBucketLabel = period === "Daily" ? "days" : "months";
+  useEffect(() => { setPageNo(1); }, [globalStartDate, globalEndDate, selectedProductParents]);
+  const [attentionCatalog, setAttentionCatalog] = useState<PerformanceCatalog | null>(null);
+  const [attentionError, setAttentionError] = useState(false);
+  const [performanceFilter, setPerformanceFilter] = useState<PerformanceFilter>("all");
+  const [amazonImageByParent, setAmazonImageByParent] = useState<Record<string, string>>({});
+  const [amazonTitleByParent, setAmazonTitleByParent] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let active = true;
+    getAmazonTrackingCatalog().then((catalog) => {
+      if (active) { setAttentionCatalog(catalog); setAttentionError(false); }
+      const images: Record<string, string> = {};
+      const titles: Record<string, string> = {};
+      const products = [...(catalog.products || [])].sort((a: any, b: any) => Number(b.parentage === "parent") - Number(a.parentage === "parent"));
+      for (const product of products) {
+        const parentIds = [...new Set([product.asin, ...(product.parentAsins || [])])];
+        for (const parent of parentIds) {
+          if (product.image) images[parent] ||= product.image;
+          if (product.title && product.title !== "-") titles[parent] ||= product.title;
+        }
+      }
+      if (active) setAmazonImageByParent(images);
+      if (active) setAmazonTitleByParent(titles);
+    }).catch(() => { if (active) { setAmazonImageByParent({}); setAttentionError(true); } });
+    return () => { active = false; };
+  }, []);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"sales" | "growth">("sales");
   const [pageNo, setPageNo] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [detailProduct, setDetailProduct] = useState<any>(null);
+  const [selectedChartIndex, setSelectedChartIndex] = useState<number | null>(null);
+  const performanceTableBody = useRef<HTMLTableSectionElement>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [category, setCategory] = useState("All categories");
   const [trendFilter, setTrendFilter] = useState("All trends");
-  const [range, setRange] = useState("Monthly");
-  const [rangeOpen, setRangeOpen] = useState(false);
   const dailySource = data.dailySales || [];
   const monthDate = (value: unknown) => {
     const text = String(value || "").trim();
@@ -773,22 +854,13 @@ function AnalyticsPage({
   const importedDays = datedSource.map((row: any) => row.date).filter((date: unknown): date is string => /^\d{4}-\d{2}-\d{2}$/.test(String(date))).sort();
   const importedStart = importedDays[0] || "";
   const importedEnd = importedDays.at(-1) || "";
-  const [startDate, setStartDate] = useState("");
-  const [endDate, setEndDate] = useState("");
-  const [draftStart, setDraftStart] = useState("");
-  const [draftEnd, setDraftEnd] = useState("");
-  useEffect(() => {
-    if (!importedStart || !importedEnd) return;
-    setStartDate(importedStart);
-    setEndDate(importedEnd);
-    setDraftStart(importedStart);
-    setDraftEnd(importedEnd);
-  }, [importedStart, importedEnd]);
-  const rangeLabels: Record<string, string> = {
-    Daily: "All imported days",
-    Weekly: "Weekly date range",
-    Monthly: "Monthly date range",
-  };
+  const globalRangeActive = Boolean(globalStartDate && globalEndDate && globalStartDate <= globalEndDate);
+  const startDate = globalRangeActive ? globalStartDate : importedStart;
+  const endDate = globalRangeActive ? globalEndDate : importedEnd;
+  const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const formatRangeDate = (value: string) => value
+    ? new Date(`${value}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : "Choose date";
   const categories = [
     "All categories",
     ...Array.from(new Set(data.products.map((p: Product) => p.category))),
@@ -834,37 +906,64 @@ function AnalyticsPage({
       );
       return point;
     });
-  const customRange = range === "Custom range";
+  const customRange = globalRangeActive;
   const baseSource = unavailable
     ? []
     : period === "Daily"
       ? dailySource
-      : customRange
-        ? datedSource
       : period === "Weekly"
         ? weeklySource
         : monthlySource;
   const rangeSize = baseSource.length;
   const source = customRange
-    ? baseSource.filter(
-        (row: any) => row.date >= startDate && row.date <= endDate,
-      )
+    ? baseSource.filter((row: any) => {
+        const monthStart = period === "Monthly" ? monthDate(row.month) : "";
+        if (monthStart) {
+          const monthEndDate = new Date(`${monthStart}T00:00:00`);
+          monthEndDate.setMonth(monthEndDate.getMonth() + 1, 0);
+          const monthEnd = dateKey(monthEndDate);
+          return monthStart <= endDate && monthEnd >= startDate;
+        }
+        if (Array.isArray(row.sourceDates)) return row.sourceDates.some((date: string) => date >= startDate && date <= endDate);
+        return row.date >= startDate && row.date <= endDate;
+      })
     : baseSource.slice(-rangeSize);
-  const chartData = source.map((row: any) => ({
-    label: row.label || row.month || row.date,
-    total: selected.reduce(
+  const formatPeriodLabel = (row: any) => {
+    if (period === "Monthly" && /^\d{4}-\d{2}$/.test(String(row.month || ""))) {
+      return new Date(`${row.month}-01T00:00:00`).toLocaleDateString("en-US", { month: "short", year: "2-digit" });
+    }
+    return row.label || row.month || row.date;
+  };
+  const chartData = source.map((row: any, index: number) => {
+    const total = selected.reduce(
       (s: number, p: Product) => s + (row[p.parent] || 0),
       0,
-    ),
-    ...Object.fromEntries(
-      selected.map((p: Product) => [p.parent, row[p.parent]]),
-    ),
-  }));
+    );
+    const previousTotal = index > 0
+      ? selected.reduce((s: number, p: Product) => s + (source[index - 1][p.parent] || 0), 0)
+      : null;
+    return {
+      label: formatPeriodLabel(row),
+      total,
+      previousTotal,
+      changeAmount: previousTotal == null ? null : total - previousTotal,
+      changePercent: previousTotal && previousTotal > 0 ? ((total - previousTotal) / previousTotal) * 100 : null,
+      ...Object.fromEntries(
+        selected.map((p: Product) => [p.parent, row[p.parent]]),
+      ),
+    };
+  });
+  useEffect(() => { setSelectedChartIndex(null); }, [startDate, endDate, scope]);
   const previous = chartData
     .slice(0, -1)
     .reduce((s: number, r: any) => s + r.total, 0);
   const total = chartData.reduce((s: number, r: any) => s + r.total, 0);
   const selectedParents = new Set(selected.map((product: Product) => product.parent));
+  // Use day-level order aggregates with daily chart points. salesRecords stays
+  // monthly for the product sales table.
+  const performanceRecords = period === "Daily" && data.dailySalesRecords?.length
+    ? data.dailySalesRecords
+    : data.salesRecords || [];
   // Some imported monthly reports retain an "Unknown" date and store their
   // actual reporting month separately. Prefer a valid full date, then fall
   // back to the reporting month so custom ranges include those records.
@@ -882,7 +981,7 @@ function AnalyticsPage({
   };
   const recordMatchesSource = (row: any, points: any[]) =>
     points.some((point: any) => recordMatchesPoint(row, point));
-  const allRecords = (data.salesRecords || []).filter((row: any) =>
+  const allRecords = performanceRecords.filter((row: any) =>
     selectedParents.has(row.parentAsin),
   );
   const metricRows = allRecords.filter((row: any) =>
@@ -913,7 +1012,7 @@ function AnalyticsPage({
     { sales: 0, orders: 0, units: 0 },
   );
   const pointMetrics = source.map((point: any) => {
-    const rowsForPoint = (data.salesRecords || []).filter((row: any) =>
+    const rowsForPoint = performanceRecords.filter((row: any) =>
       selectedParents.has(row.parentAsin) &&
       recordMatchesPoint(row, point),
     );
@@ -930,56 +1029,81 @@ function AnalyticsPage({
     pointMetrics.map((metric) =>
       metric[key],
     );
-  const seriesChange = (values: number[]) => {
-    if (values.length < 2) return { label: "N/A", up: true };
-    const previousValue = values.at(-2) || 0;
-    const currentValue = values.at(-1) || 0;
-    const change = ((currentValue - previousValue) / Math.max(Math.abs(previousValue), 1)) * 100;
-    return { label: `${Math.abs(change).toFixed(1)}%`, up: change >= 0 };
-  };
-  const orderChange = seriesChange(metricSeries("orders"));
-  const unitChange = seriesChange(metricSeries("units"));
-  const growth =
-    chartData.length > 1
-      ? ((chartData.at(-1).total - chartData.at(-2).total) /
-          Math.max(chartData.at(-2).total, 1)) *
-        100
-      : 0;
-  const rows = portfolio
+  const performanceChartData = chartData.map((point: any, index: number) => ({
+    ...point,
+    sales: point.total,
+    orders: pointMetrics[index]?.orders || 0,
+    units: pointMetrics[index]?.units || 0,
+  }));
+  const averageOrderValueSeries = pointMetrics.map((metric) =>
+    metric.orders ? metric.sales / metric.orders : 0,
+  );
+  const averageOrderValue = filteredTotals.orders
+    ? filteredTotals.sales / filteredTotals.orders
+    : 0;
+  const latestMonthGrowth = chartData.at(-1)?.changePercent ?? null;
+  const lowOrderThreshold = attentionCatalog?.performance30Days?.lowOrderThreshold || 5;
+  const productRows = portfolio
     .filter(
       (p: Product) =>
         scope === "All products" || scopeParents.includes(p.parent),
     )
     .map((p: Product) => {
-      const metric = currentMetricsByParent.get(p.parent);
-      const sales = currentSource.reduce((s: number, m: any) => s + Number(m[p.parent] || 0), 0);
+      const metric = metricsByParent.get(p.parent);
+      const sales = metric?.sales ?? 0;
       const series = source.map((m: any) => Number(m[p.parent] || 0));
-      const rowGrowth =
-        series.length > 1
-          ? ((series.at(-1) - series.at(-2)) / Math.max(series.at(-2), 1)) * 100
-          : 0;
+      const growthLatestSales = series.at(-1) || 0;
+      const growthPreviousSales = series.at(-2) || 0;
+      // Growth compares the last two periods available inside the selected date range.
+      const growthHasBaseline = series.length > 1 && growthPreviousSales > 0;
+      const rowGrowth = growthHasBaseline
+        ? ((growthLatestSales - growthPreviousSales) / growthPreviousSales) * 100
+        : null;
+      const performanceDetails = productPerformanceDetails(p.parent, p.children.filter(child => child.status !== "Previous").map(child => child.asin), attentionCatalog);
+      const attentionReasons = [...performanceDetails.attentionReasons];
+      if (sales <= 0) attentionReasons.push("No sales in selected date range");
+      else if (metric?.orders != null && metric.orders <= lowOrderThreshold) attentionReasons.push(`Low orders (${metric.orders} in selected date range)`);
       return {
         ...p,
+        // Use the current US Amazon catalog name for display; imported report
+        // titles can be localized even when the ASIN belongs to the US store.
+        name: amazonTitleByParent[p.parent] || p.name || p.parent,
+        image: amazonImageByParent[p.parent] || p.image || p.children?.map((child: any) => amazonImageByParent[child.asin] || child.image).find(Boolean) || "",
         sales,
         orders: metric?.orders ?? 0,
         units: metric?.units ?? 0,
+        ...performanceDetails,
+        attentionReasons,
+        focusAction: attentionReasons.includes("Inactive / incomplete listing") ? "Fix listing" : sales <= 0 ? "Review visibility and pricing" : metric?.orders != null && metric.orders <= lowOrderThreshold ? "Improve order volume" : "Improve product sales",
         growth: rowGrowth,
-        trend: rowGrowth > 0.1 ? "Growing" : rowGrowth < -0.1 ? "Declining" : "Stable",
+        growthLatestSales,
+        growthPreviousSales,
+        growthHasBaseline,
+        lowOrderThreshold,
+        trend: rowGrowth == null ? "No baseline" : rowGrowth > 0.1 ? "Growing" : rowGrowth < -0.1 ? "Declining" : "Stable",
       };
-    })
+    });
+  const rows = productRows
+    .filter((p: any) => !performanceOnly || matchesPerformanceFilter(p, performanceFilter))
     .filter((p: any) =>
-      `${p.name} ${p.parent} ${p.category} ${p.children.map((c: any) => c.asin).join(" ")}`
+      `${p.name} ${p.parent} ${p.category} ${p.children.map((c: any) => `${c.asin} ${c.sku || ""}`).join(" ")} ${p.sku || ""} ${[...(attentionCatalog?.products || [])].filter(item => item.asin === p.parent || item.parentAsins?.includes(p.parent) || p.children.some((child: any) => child.asin === item.asin)).map(item => item.sku || "").join(" ")}`
         .toLowerCase()
         .includes(query.toLowerCase()),
     )
     .sort((a: any, b: any) =>
-      sort === "sales"
+      performanceOnly && performanceFilter === "attention"
+        ? a.orders - b.orders || b.attentionReasons.length - a.attentionReasons.length
+        : performanceOnly && performanceFilter === "strong"
+        ? b.sales - a.sales || b.orders - a.orders
+        : sort === "sales"
         ? b.sales - a.sales
         : (b.growth ?? -999) - (a.growth ?? -999),
     );
-  const pageRows = rows.slice((pageNo - 1) * 5, pageNo * 5);
+  const focusView = performanceOnly && performanceFilter === "attention";
+  const strongView = performanceOnly && performanceFilter === "strong";
+  const pageRows = rows.slice((pageNo - 1) * pageSize, pageNo * pageSize);
   useEffect(() => {
-    const table = document.querySelector(".table-panel tbody");
+    const table = performanceTableBody.current;
     if (!table) return;
     const openDetail = (event: Event) => {
       const row = (event.target as HTMLElement).closest("tr");
@@ -993,18 +1117,14 @@ function AnalyticsPage({
   if (!data.salesRecords?.length)
     return (
       <EmptyState
-        title="No sales data uploaded"
-        body="Upload a Business Report from Upload Data to populate Sales Analytics."
+        title="No Amazon order data in the latest pull"
+        body="Sales Analytics only shows Amazon order history. It will refresh automatically after the next successful Amazon sync."
       />
     );
   const exportCsv = () => {
-    const csv = [
-      "Product,Parent ASIN,Sales,Orders,Growth",
-      ...rows.map(
-        (r: any) =>
-          `"${r.name}",${r.parent},${r.sales},${r.orders},${r.growth}`,
-      ),
-    ].join("\n");
+    const headers = focusView ? ["Product", "Parent ASIN", "Sales (selected range)", "Orders (selected range)", "Sales growth", "Listing status", "Focus reasons", "Suggested action"] : strongView ? ["Product", "Parent ASIN", "Sales (selected range)", "Orders (selected range)", "Sales growth", "Listing status"] : ["Product", "Parent ASIN", "Sales", "Orders", "Growth"];
+    const values = rows.map((row: any) => focusView ? [row.name, row.parent, row.sales, row.orders, row.growth == null ? "No baseline" : `${row.growth.toFixed(1)}%`, row.listingStatus, row.attentionReasons.join("; "), row.focusAction] : strongView ? [row.name, row.parent, row.sales, row.orders, row.growth == null ? "No baseline" : `${row.growth.toFixed(1)}%`, row.listingStatus] : [row.name, row.parent, row.sales, row.orders, row.growth]);
+    const csv = [headers, ...values].map(columns => columns.map((value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     a.download = "cdc-sales-filtered.csv";
@@ -1012,7 +1132,6 @@ function AnalyticsPage({
     URL.revokeObjectURL(a.href);
     notify("CSV downloaded", `${rows.length} filtered products were exported.`);
   };
-  const colors = ["#22d3ee", "#6366f1", "#10b981", "#f59e0b", "#fb7185"];
   if (detailProduct)
     return (
       <ProductDetailsPage
@@ -1023,318 +1142,183 @@ function AnalyticsPage({
       />
     );
   return (
-    <>
-      <div className="filter-bar">
-        <div className="filter-group product-scope-group">
-          <label>Product scope</label>
-          <ProductScopeSelect
-            products={data.products}
-            value={scope}
-            onChange={(v) => {
-              setScope(v);
-              setPageNo(1);
-            }}
-          />
-        </div>
-        <div className="filter-group">
-          <label>Time interval</label>
-          <div className="segments">
-            {["Daily", "Weekly", "Monthly"].map((x) => (
-              <button
-                className={period === x ? "active" : ""}
-                onClick={() => {
-                  setPeriod(x);
-                  setRange(x);
-                }}
-                key={x}
-              >
-                {x}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="filter-group date date-range-picker">
-          <label>Date range</label>
-          <button
-            className={rangeOpen ? "open" : ""}
-            onClick={() => {
-              setDraftStart(startDate);
-              setDraftEnd(endDate);
-              setRangeOpen((x) => !x);
-            }}
-          >
-            <CalendarDays size={16} />
-            <span>
-              {customRange
-                ? `${new Date(`${startDate}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} — ${new Date(`${endDate}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
-                : rangeLabels[range]}
-            </span>
-            <ChevronDown size={15} />
-          </button>
-          {rangeOpen && (
-            <div className="date-calendar-menu">
-              <div className="calendar-title">
-                <div>
-                  <b>Select date range</b>
-                  <small>Choose start and end dates</small>
-                </div>
-                <CalendarDays size={19} />
-              </div>
-              <div className="calendar-fields">
-                <label>
-                  <span>Start date</span>
-                  <input
-                    type="date"
-                    value={draftStart}
-                    min={importedStart || undefined}
-                    max={draftEnd}
-                    onChange={(e) => setDraftStart(e.target.value)}
-                  />
-                </label>
-                <span className="calendar-arrow">→</span>
-                <label>
-                  <span>End date</span>
-                  <input
-                    type="date"
-                    value={draftEnd}
-                    max={importedEnd || undefined}
-                    min={draftStart}
-                    onChange={(e) => setDraftEnd(e.target.value)}
-                  />
-                </label>
-              </div>
-              <div className="calendar-actions">
-                <button
-                  className="calendar-cancel"
-                  onClick={() => setRangeOpen(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="calendar-apply"
-                  disabled={!draftStart || !draftEnd || draftStart > draftEnd}
-                  onClick={() => {
-                    setStartDate(draftStart);
-                    setEndDate(draftEnd);
-                    setRange("Custom range");
-                    setPeriod("Custom");
-                    setRangeOpen(false);
-                    setPageNo(1);
-                    notify(
-                      "Date range applied",
-                      `${draftStart} to ${draftEnd}`,
-                    );
-                  }}
-                >
-                  Apply range
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      {data.granularity === "monthly" && (
-        <div className="data-banner">
-          <FileSpreadsheet size={16} />
-          <span>
-            <b>Imported monthly report active.</b> Analytics use your workbook
-            data. Upload an Order Export with a Purchase Date and matching ASIN
-            or SKU to unlock Daily and Weekly views.
-          </span>
-        </div>
-      )}
+    <div className={`analytics-page${performanceOnly ? " performance-page-only" : ""}`}>
+      {performanceOnly && <ProductPerformanceSummary products={productRows} filter={performanceFilter} onFilter={value => { setPerformanceFilter(value === performanceFilter ? "all" : value); setQuery(""); setPageNo(1); }} catalogReady={Boolean(attentionCatalog)} catalogError={attentionError} lowOrderThreshold={lowOrderThreshold} dateRangeLabel={`${formatRangeDate(startDate)} – ${formatRangeDate(endDate)}`} growthBucketLabel={growthBucketLabel} />}
       <div className="kpi-grid">
         <Kpi
           label="Gross sales"
           value={money(total)}
-          change={
-            chartData.length > 1 ? `${Math.abs(growth).toFixed(1)}%` : "N/A"
-          }
-          up={growth >= 0}
           color="cyan"
           icon={<CircleDollarSign />}
           spark={chartData.map((row: any) => Number(row.total || 0))}
         />
         <Kpi
           label="Orders"
-          value={compact(filteredTotals.orders)}
-          change={orderChange.label}
-          up={orderChange.up}
+          value={filteredTotals.orders.toLocaleString("en-US")}
           color="indigo"
           icon={<FileCheck2 />}
           spark={metricSeries("orders")}
         />
         <Kpi
           label="Units sold"
-          value={compact(filteredTotals.units)}
-          change={unitChange.label}
-          up={unitChange.up}
+          value={filteredTotals.units.toLocaleString("en-US")}
           color="emerald"
           icon={<Boxes />}
           spark={metricSeries("units")}
+        />
+        <Kpi
+          label="Average order value"
+          value={money(averageOrderValue)}
+          color="amber"
+          icon={<Receipt />}
+          spark={averageOrderValueSeries}
         />
       </div>
       <div className="analytics-grid sales-performance-grid">
         <section className="panel sales-chart">
           <PanelHead
-            title="Sales performance"
-            subtitle={`${period} gross sales across ${scope.toLowerCase()}`}
-            actions={
-              <>
-                <span className="legend-dot cyan" />
-                Current period <span className="legend-dot muted" />
-                Previous period
-              </>
-            }
+            title="Performance"
+            subtitle={`Sales and orders over time · click any ${period === "Daily" ? "day" : "month"} for sales, orders, units and change details · ${formatRangeDate(customRange ? startDate : importedStart)} – ${formatRangeDate(customRange ? endDate : importedEnd)}`}
           />
+          <div className="sales-chart-summary">
+            <div><span><i className="sales-color-orange" />Gross sales</span><strong>{money(filteredTotals.sales)}</strong></div>
+            <div><span><i className="sales-color-blue" />Orders</span><strong>{filteredTotals.orders.toLocaleString("en-US")}</strong></div>
+            <div><span>Units sold</span><strong>{filteredTotals.units.toLocaleString("en-US")}</strong></div>
+            <div><span><i className="sales-color-violet" />Average order value</span><strong>{money(averageOrderValue)}</strong></div>
+          </div>
           {unavailable ? (
             <EmptyState
               title={`${period} data is not available`}
-              body="Upload an Order Export with a Purchase Date and matching ASIN or SKU to view real Daily and Weekly data."
+              body="The saved Amazon order pull has no dated rows for this interval. Pull Amazon order history and refresh when it completes."
             />
           ) : (
             <>
               <div className="chart-area">
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={chartData}>
-                    <defs>
-                      <linearGradient
-                        id="salesFill"
-                        x1="0"
-                        x2="0"
-                        y1="0"
-                        y2="1"
-                      >
-                        <stop
-                          offset="0%"
-                          stopColor="#22d3ee"
-                          stopOpacity={0.26}
-                        />
-                        <stop
-                          offset="100%"
-                          stopColor="#22d3ee"
-                          stopOpacity={0}
-                        />
-                      </linearGradient>
-                    </defs>
+                  <ComposedChart
+                    data={performanceChartData}
+                    margin={{ top: 8, right: 14, left: 4, bottom: 0 }}
+                    onClick={(state: any) => {
+                      if (state?.activeTooltipIndex == null) return;
+                      const index = Number(state.activeTooltipIndex);
+                      if (Number.isInteger(index) && index >= 0 && index < performanceChartData.length) setSelectedChartIndex(index);
+                    }}
+                  >
                     <CartesianGrid stroke="#e6edf5" vertical={false} />
                     <XAxis
                       dataKey="label"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 11, fill: "#718096" }}
+                      tick={{ fontSize: 10, fill: "#718096" }}
+                      interval="preserveStartEnd"
                     />
                     <YAxis
+                      yAxisId="sales"
                       axisLine={false}
                       tickLine={false}
-                      tickFormatter={(v) => `$${Math.round(v / 1000)}k`}
-                      tick={{ fontSize: 11, fill: "#718096" }}
+                      tickFormatter={(v) => money(v)}
+                      tick={{ fontSize: 10, fill: "#718096" }}
+                      width={76}
                     />
-                    <ChartTooltip content={<CustomTooltip />} />
-                    <Area
+                    <YAxis
+                      yAxisId="count"
+                      orientation="right"
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={(value) => Number(value).toLocaleString("en-US")}
+                      tick={{ fontSize: 10, fill: "#718096" }}
+                      width={62}
+                    />
+                    <ChartTooltip content={<SalesPerformanceTooltip />} />
+                    <Bar
+                      yAxisId="count"
+                      dataKey="units"
+                      name="Units sold"
+                      radius={[3, 3, 0, 0]}
+                      maxBarSize={30}
+                      cursor="pointer"
+                      onClick={(_point: any, index: number) => setSelectedChartIndex(index)}
+                    >
+                      {performanceChartData.map((point: any, index: number) => (
+                        <Cell
+                          key={point.label + index}
+                          fill="#c6ece7"
+                          stroke={selectedChartIndex === index ? "#5278ff" : "none"}
+                          strokeWidth={selectedChartIndex === index ? 2 : 0}
+                        />
+                      ))}
+                    </Bar>
+                    <Line
+                      yAxisId="count"
                       type="monotone"
-                      dataKey="total"
-                      stroke="#0891b2"
+                      dataKey="orders"
+                      name="Orders"
+                      stroke="#5278ff"
                       strokeWidth={2.5}
-                      fill="url(#salesFill)"
-                      dot={chartData.length === 1 ? { r: 4, fill: "#0891b2", stroke: "white", strokeWidth: 2 } : false}
-                      activeDot={{
-                        r: 5,
-                        fill: "#0891b2",
-                        stroke: "white",
-                        strokeWidth: 3,
-                      }}
+                      dot={false}
+                      activeDot={false}
                     />
-                  </AreaChart>
+                    <Line
+                      yAxisId="sales"
+                      type="monotone"
+                      dataKey="sales"
+                      name="Gross sales"
+                      stroke="#ff713d"
+                      strokeWidth={2.8}
+                      dot={false}
+                      activeDot={false}
+                    />
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
+              {selectedChartIndex != null && chartData[selectedChartIndex] && (
+                <div className="sales-period-detail" aria-live="polite">
+                  <div className="sales-period-detail-heading">
+                    <div>
+                      <span>Selected {period.toLowerCase()}</span>
+                      <strong>{chartData[selectedChartIndex].label}</strong>
+                    </div>
+                    <small>Click another month on the chart to compare periods</small>
+                  </div>
+                  <div className="sales-period-detail-metrics">
+                    <div><span>Total sales</span><strong>{money(chartData[selectedChartIndex].total)}</strong></div>
+                    <div className={chartData[selectedChartIndex].changeAmount == null ? "" : chartData[selectedChartIndex].changeAmount >= 0 ? "up" : "down"}>
+                      <span>Change vs. previous {period.toLowerCase()}</span>
+                      <strong>
+                        {chartData[selectedChartIndex].changeAmount == null
+                          ? "No previous period"
+                          : `${chartData[selectedChartIndex].changeAmount >= 0 ? "+" : "−"}${money(Math.abs(chartData[selectedChartIndex].changeAmount))} (${chartData[selectedChartIndex].changePercent == null ? "no % baseline" : `${chartData[selectedChartIndex].changePercent >= 0 ? "+" : "−"}${Math.abs(chartData[selectedChartIndex].changePercent).toFixed(1)}%`})`}
+                      </strong>
+                    </div>
+                    <div><span>Orders</span><strong>{(pointMetrics[selectedChartIndex]?.orders || 0).toLocaleString("en-US")}</strong></div>
+                    <div><span>Units sold</span><strong>{(pointMetrics[selectedChartIndex]?.units || 0).toLocaleString("en-US")}</strong></div>
+                  </div>
+                </div>
+              )}
               <div className="chart-foot">
                 <span>
-                  <b>{money(chartData.at(-1)?.total || 0)}</b> latest period
+                  <b>{money(chartData.at(-1)?.total || 0)}</b> sales in latest {period.toLowerCase()}
                 </span>
-                <span className="positive">
-                  <ArrowUpRight size={14} />
-                  {growth.toFixed(1)}% vs. previous
+                <span className={latestMonthGrowth == null ? "muted-text" : latestMonthGrowth >= 0 ? "positive" : "negative"}>
+                  {latestMonthGrowth == null ? "No previous-period baseline" : (
+                    <>
+                      {latestMonthGrowth >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                      {money(Math.abs(chartData.at(-1)?.changeAmount || 0))} ({Math.abs(latestMonthGrowth).toFixed(1)}%) vs. previous {period.toLowerCase()}
+                    </>
+                  )}
                 </span>
               </div>
             </>
           )}
         </section>
       </div>
-      <div className="analytics-grid lower">
-        <section className="panel comparison">
-          <PanelHead
-            title="Product comparison"
-            subtitle="Revenue trend for leading parent ASINs"
-          />
-          <div className="chart-area small">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid stroke="#e6edf5" vertical={false} />
-                <XAxis
-                  dataKey="label"
-                  axisLine={false}
-                  tickLine={false}
-                  tick={{ fontSize: 11, fill: "#718096" }}
-                />
-                <YAxis hide />
-                <ChartTooltip content={<CustomTooltip />} />
-                {rows.slice(0, 3).map((p: Product, i: number) => (
-                  <Line
-                    key={p.parent}
-                    dataKey={p.parent}
-                    name={p.name}
-                    stroke={colors[i]}
-                    strokeWidth={2.3}
-                    dot={chartData.length === 1 ? { r: 4, fill: colors[i], stroke: "white", strokeWidth: 2 } : false}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="product-legend">
-            {rows.slice(0, 3).map((p: Product, i: number) => (
-              <span key={p.parent}>
-                <i style={{ background: colors[i] }} />
-                {p.name}
-              </span>
-            ))}
-          </div>
-        </section>
-        <section className="panel top-products">
-          <PanelHead title="Top performers" subtitle="This period" />
-          <div className="ranking">
-            {rows.slice(0, 4).map((p: any, i: number) => (
-              <div key={p.parent}>
-                <span className="rank">{i + 1}</span>
-                <div className={`product-icon c${i}`}>
-                  <Boxes size={17} />
-                </div>
-                <div>
-                  <b>{p.name}</b>
-                  <span>{p.parent}</span>
-                </div>
-                <strong>{money(p.sales)}</strong>
-                {p.growth == null ? (
-                  <em className="muted-text">Not enough history</em>
-                ) : (
-                  <em className={p.growth >= 0 ? "positive" : "negative"}>
-                    {p.growth >= 0 ? "+" : ""}
-                    {p.growth.toFixed(1)}%
-                  </em>
-                )}
-              </div>
-            ))}
-          </div>
-        </section>
-      </div>
-      <section className="panel table-panel">
+      <section className="panel table-panel product-performance-panel">
         <div className="table-toolbar">
           <PanelHead
-            title="Product performance"
-            subtitle="Parent-level sales summary"
+            title={performanceOnly && performanceFilter !== "all" ? ({ attention: "Low-performing products", stock: "Products with stock risk", strong: "Products performing well" } as const)[performanceFilter] : "Product performance"}
+            subtitle={focusView ? `Selected range · ${formatRangeDate(startDate)} – ${formatRangeDate(endDate)} · Fewest orders first` : strongView ? `Selected range · ${formatRangeDate(startDate)} – ${formatRangeDate(endDate)} · Highest sales first` : "Parent-level sales and orders use the selected date range"}
           />
-          <div>
+          <div className="performance-table-actions">
             <div className="table-search">
               <Search size={15} />
               <input
@@ -1343,115 +1327,97 @@ function AnalyticsPage({
                   setQuery(e.target.value);
                   setPageNo(1);
                 }}
-                placeholder="Search products…"
+                placeholder="Search name, ASIN or SKU…"
+                aria-label="Search product performance"
               />
             </div>
-            <button className="secondary" onClick={exportCsv}>
+            <button className="secondary dashboard-export-button" onClick={exportCsv}>
               <Download size={16} /> CSV
             </button>
           </div>
         </div>
+        <div className="growth-explainer">
+          <strong>How Growth is calculated</strong>
+          <span>{strongView ? <>Performing well means positive sales and more than {lowOrderThreshold} orders in the selected range. Sales growth = (latest displayed period sales − previous displayed period sales) ÷ previous displayed period sales × 100. This range compares {growthBucketLabel}. A missing or zero previous-period baseline displays as “No baseline.” Listing status is separate, so an incomplete listing can still qualify.</> : <>
+            Sales growth = (latest displayed period sales − previous displayed period sales) ÷ previous displayed period sales × 100. This range compares {growthBucketLabel}. A missing or zero previous-period baseline displays as “No baseline.” Sales and order totals use the selected date range; monthly reports are included by month when the range overlaps part of a month.
+          </>}</span>
+        </div>
         {rows.length ? (
           <>
             <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Product</th>
-                    <th>Parent ASIN</th>
-                    <th>
-                      <button onClick={() => setSort("sales")}>
-                        Gross sales <ChevronsUpDown size={13} />
-                      </button>
-                    </th>
-                    <th>Orders</th>
-                    <th>Units</th>
-                    <th>
-                      <button onClick={() => setSort("growth")}>
-                        Growth <ChevronsUpDown size={13} />
-                      </button>
-                    </th>
-                    <th>Status</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {pageRows.map((p: any) => (
-                    <tr key={p.parent}>
-                      <td>
-                        <div className="product-cell">
-                          <div className="mini-product">
-                            <Boxes size={16} />
-                          </div>
-                          <div>
-                            <b>{p.name}</b>
-                            <span>{p.category}</span>
-                          </div>
-                        </div>
-                      </td>
-                      <td>
-                        <code>{p.parent}</code>
-                      </td>
-                      <td>
-                        <strong>{money(p.sales)}</strong>
-                      </td>
-                      <td>{p.orders.toLocaleString()}</td>
-                      <td>{p.units.toLocaleString()}</td>
-                      <td>
-                        <span
-                          className={p.growth >= 0 ? "positive" : "negative"}
-                        >
-                          {p.growth >= 0 ? (
-                            <ArrowUpRight size={14} />
-                          ) : (
-                            <ArrowDownRight size={14} />
-                          )}{" "}
-                          {Math.abs(p.growth).toFixed(1)}%
-                        </span>
-                      </td>
-                      <td>
-                        <span className={`trend ${p.trend}`}>{p.trend}</span>
-                      </td>
-                      <td>
-                        <MoreHorizontal size={17} />
-                      </td>
-                    </tr>
-                  ))}
+              <table className={`performance-data-grid${focusView ? " low-performance-grid" : strongView ? " strong-performance-grid" : ""}`}>
+                <thead><tr>
+                  <th>Product</th><th>Parent ASIN</th>
+                  {focusView ? <><th>Sales · selected range</th><th>Orders · selected range</th><th>Sales growth</th><th>Listing status</th><th>Focus reasons & next step</th></> : strongView ? <><th>Sales · selected range</th><th>Orders · selected range</th><th>Sales growth</th><th>Listing status</th></> : <>
+                    <th><button onClick={() => setSort("sales")}>Gross sales <ChevronsUpDown size={13} /></button></th><th>Orders</th><th>Units</th>
+                    <th><button title="Gross sales change versus the previous displayed month" onClick={() => setSort("growth")}>Growth <ChevronsUpDown size={13} /></button></th><th>Sales trend</th><th></th>
+                  </>}
+                </tr></thead>
+                <tbody ref={performanceTableBody}>
+                  {pageRows.map((p: any) => <tr key={p.parent} className={performanceOnly && (performanceFilter === "stock" ? p.stockReasons.length : performanceFilter === "attention" ? p.attentionReasons.length : false) ? "performance-needs-attention" : undefined}>
+                    <td><div className="product-cell"><ProductThumbnail src={p.image} title={p.name} size={34} /><div><b>{p.name && p.name.trim() !== "-" ? p.name : p.parent}</b><span>{p.category}</span>
+                      {performanceOnly && !focusView && !strongView && <div className="performance-attention-reasons">{(performanceFilter === "stock" ? p.stockReasons : p.attentionReasons).map((reason: string) => <small key={reason}>{reason}</small>)}</div>}
+                    </div></div></td>
+                    <td><code>{p.parent}</code></td>
+                    {focusView ? <>
+                      <td><strong>{money(p.sales)}</strong></td>
+                      <td>{p.orders.toLocaleString("en-US")}</td>
+                      <td><span className={p.growth == null ? "muted-text" : p.growth >= 0 ? "positive" : "negative"} title="Sales growth between the last two periods in the selected range">{p.growth == null ? "No baseline" : `${p.growth >= 0 ? "+" : "−"}${Math.abs(p.growth).toFixed(1)}%`}</span></td>
+                      <td className="performance-listing-status">{p.listingStatus}</td>
+                      <td className="performance-focus-action"><div className="performance-focus-reasons">{p.attentionReasons.map((reason: string) => <span key={reason}>{reason}</span>)}</div><small>{p.focusAction}</small></td>
+                    </> : strongView ? <>
+                      <td><strong>{money(p.sales)}</strong></td>
+                      <td>{p.orders.toLocaleString("en-US")}</td>
+                      <td><span className={p.growth == null ? "muted-text" : p.growth >= 0 ? "positive" : "negative"} title="Sales growth between the last two periods in the selected range">{p.growth == null ? "No baseline" : `${p.growth >= 0 ? "+" : "−"}${Math.abs(p.growth).toFixed(1)}%`}</span></td>
+                      <td className="performance-listing-status">{p.listingStatus}</td>
+                    </> : <>
+                      <td><strong>{money(p.sales)}</strong></td><td>{p.orders.toLocaleString()}</td><td>{p.units.toLocaleString()}</td>
+                      <td><span className={p.growth == null ? "muted-text" : p.growth >= 0 ? "positive" : "negative"} title={p.growthHasBaseline ? "Gross sales change versus the previous displayed month" : "Growth needs a previous sales baseline"}>{p.growth == null ? "No baseline" : <>{p.growth >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}{" "}{Math.abs(p.growth).toFixed(1)}%</>}</span></td>
+                      <td><span className={"trend " + p.trend}>{p.trend}</span></td><td><MoreHorizontal size={17} /></td>
+                    </>}
+                  </tr>)}
                 </tbody>
               </table>
             </div>
             <Pager
               page={pageNo}
-              pages={Math.max(1, Math.ceil(rows.length / 5))}
+              pages={Math.max(1, Math.ceil(rows.length / pageSize))}
               total={rows.length}
-              pageSize={5}
+              pageSize={pageSize}
               onChange={setPageNo}
+              pageSizeOptions={[10, 20, 50, 100]}
+              onPageSizeChange={(size) => { setPageSize(size); setPageNo(1); }}
             />
           </>
         ) : (
           <EmptyState
             title="No matching products"
-            body="Try a different product name or parent ASIN."
+            body="Try another search or select the Products card to show all products."
           />
         )}
       </section>
-    </>
+    </div>
   );
 }
 
 function AllProductSalesPage({
   data,
-  tracking,
   notify,
+  tracking = {},
+  ordersOnly = false,
 }: {
   data: any;
-  tracking: any;
   notify: (a: string, b: string) => void;
+  tracking?: any;
+  ordersOnly?: boolean;
 }) {
+  const { startDate, endDate, selectedProductParents } = useGlobalDateRange();
+  const globalRangeActive = Boolean(startDate && endDate && startDate <= endDate);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
-  const [customDateActive, setCustomDateActive] = useState(false);
-  const [dateRangeOpen, setDateRangeOpen] = useState(false);
+  const [bestSellerView, setBestSellerView] = useState(false);
+  const [ordersView, setOrdersView] = useState(ordersOnly);
+  useEffect(() => { setPage(1); }, [startDate, endDate, selectedProductParents]);
   const [parentFilters, setParentFilters] = useState<string[]>([]);
   const [childFilters, setChildFilters] = useState<string[]>([]);
   const [parentPickerOpen, setParentPickerOpen] = useState(false);
@@ -1461,10 +1427,27 @@ function AllProductSalesPage({
   const parentPickerRef = useRef<HTMLDivElement>(null);
   const childPickerRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const close = (event: MouseEvent) => { if (parentPickerRef.current && !parentPickerRef.current.contains(event.target as Node)) setParentPickerOpen(false); if (childPickerRef.current && !childPickerRef.current.contains(event.target as Node)) setChildPickerOpen(false); }; document.addEventListener("mousedown", close); return () => document.removeEventListener("mousedown", close); }, []);
-  const allRows = data.salesRecords || [];
+  const allRows: any[] = data.salesRecords || [];
+  const productByParent = new Map<string, any>((data.products || []).map((product: any) => [String(product.parent || "").toUpperCase(), product] as [string, any]));
+  const productDetailsFor = (row: any) => {
+    const parentAsin = String(row.parentAsin || "");
+    const childAsin = String(row.childAsin || row.asin || "");
+    const parent = productByParent.get(parentAsin.toUpperCase()) as any;
+    const child = parent?.children?.find((item: any) => String(item.asin || "").toUpperCase() === childAsin.toUpperCase());
+    return {
+      // If Amazon did not return a US title, show the ASIN rather than leaking
+      // a localized title copied from an order export.
+      title: child?.title || parent?.name || childAsin || parentAsin || "Product title unavailable",
+      image: child?.image || parent?.image || "",
+    };
+  };
   const recordDate = (row: any) => {
     const value = String(row.date || row.orderDate || row.month || "").trim();
     if (!value) return null;
+    // Keep the source calendar day for Amazon ISO timestamps instead of
+    // letting the browser's UTC conversion shift the order across a day.
+    const isoDate = value.match(/^(\d{4}-\d{2}-\d{2})(?:$|[Tt ])/);
+    if (isoDate) return isoDate[1];
     const monthIndex = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(value.slice(0, 3).toLowerCase());
     if (monthIndex >= 0) {
       const year = Number(value.match(/\b(20\d{2})\b/)?.[1] || new Date().getFullYear());
@@ -1473,13 +1456,53 @@ function AllProductSalesPage({
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
   };
-  const availableDates = allRows.map(recordDate).filter((date): date is string => Boolean(date)).sort();
-  const minDate = availableDates[0] || "";
-  const maxDate = availableDates.at(-1) || "";
-  const [startDate, setStartDate] = useState(minDate);
-  const [endDate, setEndDate] = useState(maxDate);
-  const [draftStartDate, setDraftStartDate] = useState(minDate);
-  const [draftEndDate, setDraftEndDate] = useState(maxDate);
+  const recordInGlobalRange = (row: any) => {
+    const exactDate = String(row.date || row.orderDate || "");
+    const monthValue = String(row.month || "").trim();
+    const monthStart = /^\d{4}-\d{2}$/.test(monthValue)
+      ? `${monthValue}-01`
+      : /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+20\d{2}$/i.test(monthValue)
+        ? recordDate({ month: monthValue })
+        : "";
+    if (monthStart && !/^\d{4}-\d{2}-\d{2}$/.test(exactDate)) {
+      const monthEndDate = new Date(`${monthStart}T00:00:00`);
+      monthEndDate.setMonth(monthEndDate.getMonth() + 1, 0);
+      const monthEnd = `${monthEndDate.getFullYear()}-${String(monthEndDate.getMonth() + 1).padStart(2, "0")}-${String(monthEndDate.getDate()).padStart(2, "0")}`;
+      return monthStart <= endDate && monthEnd >= startDate;
+    }
+    const date = recordDate(row);
+    return Boolean(date && date >= startDate && date <= endDate);
+  };
+  const dailySalesByProduct = new Map<string, any>();
+  for (const order of data.orderRecords || []) {
+    const date = recordDate({ orderDate: order.orderDate });
+    const parentAsin = String(order.parentAsin || "");
+    const childAsin = String(order.childAsin || order.asin || "");
+    if (!date || !parentAsin || !childAsin) continue;
+    const key = `${date}\u001f${parentAsin}\u001f${childAsin}`;
+    const product = productDetailsFor({ parentAsin, childAsin });
+    const current = dailySalesByProduct.get(key) || { date, parentAsin, childAsin, title: product.title, image: product.image, sales: 0, orders: 0, units: 0, orderIds: new Set<string>() };
+    const price = Number(String(order.itemPrice ?? order.sales ?? 0).replace(/[$,\s]/g, "")) || 0;
+    current.sales += price;
+    current.units += Number(order.quantity ?? order.units ?? 0) || 0;
+    const orderId = String(order.orderId || order.amazonOrderId || order["amazon-order-id"] || "").trim();
+    if (orderId) current.orderIds.add(orderId);
+    else current.orders += 1;
+    dailySalesByProduct.set(key, current);
+  }
+  const dailySalesRecords = [...dailySalesByProduct.values()]
+    .map((row) => ({ ...row, month: row.date, orders: row.orders + row.orderIds.size }))
+    .sort((a, b) => b.date.localeCompare(a.date) || a.parentAsin.localeCompare(b.parentAsin) || a.childAsin.localeCompare(b.childAsin));
+  const hasDailyOrderData = dailySalesRecords.length > 0;
+  const salesRowsSource = dailySalesRecords.length ? dailySalesRecords : allRows;
+  const formatAvailablePeriod = (records: any[], dateFor: (record: any) => string | null) => {
+    const dates = records.map(dateFor).filter((date): date is string => Boolean(date)).sort();
+    if (!dates.length) return "No dated sales or order records are loaded.";
+    const format = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    return `Loaded data covers ${format(dates[0])} to ${format(dates.at(-1)!)}.`;
+  };
+  const salesDataPeriod = formatAvailablePeriod(allRows, (row) => recordDate(row));
+  const orderDataPeriod = formatAvailablePeriod(data.orderRecords || [], (record) => recordDate({ orderDate: record.orderDate }));
   const parents = [...new Set(allRows.map((r: any) => r.parentAsin).filter(Boolean))].sort();
   // A child ASIN is valid only under its selected parent. Showing all children
   // here allowed an unrelated child to be selected and produced a false empty
@@ -1498,31 +1521,62 @@ function AllProductSalesPage({
       return next.length === current.length ? current : next;
     });
   }, [parentFilters, children]);
-  const rows = allRows.filter((r: any) =>
-    (!customDateActive || (() => { const date = recordDate(r); return Boolean(date && date >= startDate && date <= endDate); })()) &&
+  const rows = salesRowsSource.map((row: any) => ({ ...row, ...productDetailsFor(row) })).filter((r: any) =>
+    (!globalRangeActive || recordInGlobalRange(r)) &&
+    (!selectedProductParents.length || selectedProductParents.includes(r.parentAsin)) &&
     (parentFilters.length === 0 || parentFilters.includes(r.parentAsin)) &&
     (childFilters.length === 0 || childFilters.includes(r.childAsin)) &&
     `${r.parentAsin} ${r.childAsin} ${r.title}`.toLowerCase().includes(query.toLowerCase()),
   );
+  const productPerformance = [...rows.reduce((totals: Map<string, any>, row: any) => {
+    const asin = String(row.childAsin || row.parentAsin || row.title || "Unknown product");
+    const current = totals.get(asin) || {
+      asin,
+      parentAsin: row.parentAsin,
+      childAsin: row.childAsin || (row.asin && row.asin !== row.parentAsin ? row.asin : ""),
+      title: row.title || asin,
+      image: row.image || "",
+      sales: 0,
+      orders: 0,
+      units: 0,
+    };
+    current.sales += Number(row.sales || 0);
+    current.orders += Number(row.orders || 0);
+    current.units += Number(row.units || 0);
+    totals.set(asin, current);
+    return totals;
+  }, new Map()).values()];
+  const topPerformance = [...productPerformance].sort((a, b) => b.sales - a.sales)[0];
+  const bestSeller = [...productPerformance].sort((a, b) => b.units - a.units)[0];
+  const totalOrders = rows.reduce((total: number, row: any) => total + Number(row.orders || 0), 0);
+  const orderRows = (data.orderRecords || []).map((record: any) => ({ ...record, ...productDetailsFor(record) })).filter((record: any) => {
+    const date = recordDate({ orderDate: record.orderDate });
+    return (!globalRangeActive || Boolean(date && date >= startDate && date <= endDate)) &&
+      (!selectedProductParents.length || selectedProductParents.includes(record.parentAsin));
+  }).filter((record: any) => `${record.orderId || record.amazonOrderId || record["amazon-order-id"] || ""} ${record.parentAsin || ""} ${record.childAsin || record.asin || ""} ${record.sku || ""} ${record.title || record.productName || record["product-name"] || ""} ${record.status || record.orderStatus || record["order-status"] || ""}`.toLowerCase().includes(query.toLowerCase()))
+    .sort((a: any, b: any) => String(b.orderDate || "").localeCompare(String(a.orderDate || "")));
   const filteredParents = new Set(rows.map((r: any) => r.parentAsin));
   const filteredData = { ...data, salesRecords: rows, products: (data.products || []).filter((product: any) => filteredParents.has(product.parent)) };
   // The workbook contains a master ASIN audit trail. Sales filters must only
   // limit the sales tabs, never erase preserved ASIN/attribute history.
-  const filteredTracking = { ...tracking, asinChanges: tracking.asinChanges || [], asinHistory: tracking.asinHistory || [], attributeChanges: tracking.attributeChanges || [] };
-  const filtersActive = customDateActive || parentFilters.length > 0 || childFilters.length > 0 || !!query;
+  // Orders is a standalone page and must not rely on the lazily loaded tracking state.
+  const filteredTracking = ordersOnly
+    ? {}
+    : { ...tracking, asinChanges: tracking.asinChanges || [], asinHistory: tracking.asinHistory || [], attributeChanges: tracking.attributeChanges || [] };
+  const filtersActive = globalRangeActive || selectedProductParents.length > 0 || parentFilters.length > 0 || childFilters.length > 0 || !!query;
+  const pageFiltersActive = parentFilters.length > 0 || childFilters.length > 0 || !!query;
   const toggleParent = (parent: string) => { setParentFilters(current => current.includes(parent) ? current.filter(value => value !== parent) : [...current, parent]); setPage(1); };
   const toggleChild = (child: string) => { setChildFilters(current => current.includes(child) ? current.filter(value => value !== child) : [...current, child]); setPage(1); };
   const pageSize = 15;
-  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
-  const shown = rows.slice((page - 1) * pageSize, page * pageSize);
+  const displayRows = ordersView ? orderRows : bestSellerView ? [...productPerformance].sort((a, b) => b.sales - a.sales || b.units - a.units) : rows;
+  const pages = Math.max(1, Math.ceil(displayRows.length / pageSize));
+  const shown = displayRows.slice((page - 1) * pageSize, page * pageSize);
   return (
     <>
       <div className="all-sales-head">
         <div>
-          <b>{rows.length.toLocaleString()} Amazon sales records</b>
-          <span>
-            Parent and child ASIN performance from the latest Amazon order pull.
-          </span>
+          <b>{ordersView ? `${orderRows.length.toLocaleString()} order rows` : bestSellerView ? `${productPerformance.length.toLocaleString()} best-selling products` : `${rows.length.toLocaleString()} ${hasDailyOrderData ? "daily sales records" : "sales records"}`}</b>
+          <span>{ordersView ? "Order details matching the selected date and products." : "Daily parent and child ASIN performance for the selected range."}</span>
         </div>
         <div>
           <button
@@ -1535,15 +1589,17 @@ function AllProductSalesPage({
               // catalog history. Include it when available so this export has
               // the same merge, reversal and relationship history as Tracking.
               let exportTracking = filteredTracking;
-              try {
-                const response = await fetch("/api/amazon/monitor", { cache: "no-store" });
-                if (response.ok) {
-                  const monitor = await response.json();
-                  exportTracking = { ...filteredTracking, amazonTrackingChanges: monitor.changes || [] };
+              if (!ordersOnly) {
+                try {
+                  const response = await fetch("/api/amazon/monitor", { cache: "no-store" });
+                  if (response.ok) {
+                    const monitor = await response.json();
+                    exportTracking = { ...filteredTracking, amazonTrackingChanges: monitor.changes || [] };
+                  }
+                } catch {
+                  // The workbook still contains the uploaded catalog history if
+                  // the Amazon monitor is temporarily unavailable.
                 }
-              } catch {
-                // The workbook still contains the uploaded catalog history if
-                // the Amazon monitor is temporarily unavailable.
               }
               exportAnalyticsWorkbook(filteredData, exportTracking);
               notify(
@@ -1556,49 +1612,43 @@ function AllProductSalesPage({
           </button>
         </div>
       </div>
-      <div className="all-sales-filters">
-        <div className="all-sales-date-filter">
-          <label>Date range</label>
-          <button
-            type="button"
-            className={dateRangeOpen ? "open" : ""}
-            onClick={() => {
-              setDraftStartDate(startDate || minDate);
-              setDraftEndDate(endDate || maxDate);
-              setDateRangeOpen((open) => !open);
-            }}
-            disabled={!minDate || !maxDate}
-          >
-            <CalendarDays size={15} />
-            <span>{customDateActive ? `${new Date(`${startDate}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} — ${new Date(`${endDate}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : "Custom date range"}</span>
-            <ChevronDown size={15} />
-          </button>
-          {dateRangeOpen && (
-            <div className="all-sales-date-menu">
-              <div>
-                <b>Custom date range</b>
-                <small>Month-level sales records are filtered by reporting month.</small>
-              </div>
-              <div className="all-sales-date-fields">
-                <label>Start date<input type="date" value={draftStartDate} min={minDate} max={draftEndDate || maxDate} onChange={(e) => setDraftStartDate(e.target.value)} /></label>
-                <label>End date<input type="date" value={draftEndDate} min={draftStartDate || minDate} max={maxDate} onChange={(e) => setDraftEndDate(e.target.value)} /></label>
-              </div>
-              <div className="all-sales-date-actions">
-                <button type="button" className="secondary" onClick={() => setDateRangeOpen(false)}>Cancel</button>
-                <button type="button" className="primary" disabled={!draftStartDate || !draftEndDate || draftStartDate > draftEndDate} onClick={() => { setStartDate(draftStartDate); setEndDate(draftEndDate); setCustomDateActive(true); setDateRangeOpen(false); setPage(1); }}>Apply range</button>
-              </div>
-            </div>
-          )}
-        </div>
+      {!ordersOnly && <section className="sales-highlights" aria-label="Product sales highlights">
+        <button className="sales-highlight-card sales-highlight-top" type="button" onClick={() => {
+          setBestSellerView(false);
+          setOrdersView(false);
+          setParentFilters([]);
+          setChildFilters([]);
+          setQuery("");
+          setPage(1);
+          window.requestAnimationFrame(() => document.getElementById("all-product-sales-table")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        }} aria-label="Show all product sales">
+          <span className="sales-highlight-icon"><CircleDollarSign size={17} /></span>
+          <div className="sales-highlight-copy"><small>Sales</small><strong>{money(topPerformance?.sales || 0)}</strong></div>
+        </button>
+        <button className={`sales-highlight-card sales-highlight-best${bestSellerView ? " is-active" : ""}`} type="button" onClick={() => {
+          if (!bestSeller) return;
+          setOrdersView(false);
+          setParentFilters([]);
+          setChildFilters([]);
+          setQuery("");
+          setPage(1);
+          setBestSellerView((active) => !active);
+          window.requestAnimationFrame(() => document.getElementById("all-product-sales-table")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+        }} aria-label="Show best-selling products ranked by sales" disabled={!bestSeller}>
+          <span className="sales-highlight-icon"><Boxes size={17} /></span>
+          <div className="sales-highlight-copy"><small>Best Seller</small><strong>{(bestSeller?.units || 0).toLocaleString()} units</strong></div>
+        </button>
+      </section>}
+      {!ordersView && <div className="all-sales-filters">
         <label className="parent-multi-filter">Parent ASIN<div className="parent-multi-picker" ref={parentPickerRef}><button type="button" className="parent-multi-trigger" onClick={()=>setParentPickerOpen(open=>{const next=!open;if(next)setParentAsinSearch("");return next})}><span>{parentFilters.length ? `${parentFilters.length} parent ASIN${parentFilters.length===1?"":"s"} selected` : "All parent ASINs"}</span><ChevronDown size={15}/></button>{parentPickerOpen&&<div className="parent-multi-menu"><div className="asin-picker-search"><Search size={14}/><input autoFocus value={parentAsinSearch} onChange={(event)=>setParentAsinSearch(event.target.value)} placeholder="Search parent ASIN" aria-label="Search parent ASIN" /></div><button type="button" className="parent-select-all" disabled={!parentPickerOptions.length} onClick={()=>{const allSelected=parentPickerOptions.every(parent=>parentFilters.includes(parent));setParentFilters(current=>allSelected?current.filter(parent=>!parentPickerOptions.includes(parent)):[...new Set([...current,...parentPickerOptions])]);setPage(1)}}>{parentPickerOptions.every(parent=>parentFilters.includes(parent))?"Clear visible":"Select visible"}</button><div>{parentPickerOptions.map(parent=><label key={parent}><input type="checkbox" checked={parentFilters.includes(parent)} onChange={()=>toggleParent(parent)}/><code>{parent}</code></label>)}{!parentPickerOptions.length&&<p className="asin-picker-empty">No parent ASIN found.</p>}</div></div>}</div></label>
         <label className="parent-multi-filter">Child ASIN<div className="parent-multi-picker" ref={childPickerRef}><button type="button" className="parent-multi-trigger" onClick={()=>setChildPickerOpen(open=>{const next=!open;if(next)setChildAsinSearch("");return next})}><span>{childFilters.length ? `${childFilters.length} child ASIN${childFilters.length===1?"":"s"} selected` : "All child ASINs"}</span><ChevronDown size={15}/></button>{childPickerOpen&&<div className="parent-multi-menu"><div className="asin-picker-search"><Search size={14}/><input autoFocus value={childAsinSearch} onChange={(event)=>setChildAsinSearch(event.target.value)} placeholder="Search child ASIN" aria-label="Search child ASIN" /></div><button type="button" className="parent-select-all" disabled={!childPickerOptions.length} onClick={()=>{const allSelected=childPickerOptions.every(child=>childFilters.includes(child));setChildFilters(current=>allSelected?current.filter(child=>!childPickerOptions.includes(child)):[...new Set([...current,...childPickerOptions])]);setPage(1)}}>{childPickerOptions.every(child=>childFilters.includes(child))?"Clear visible":"Select visible"}</button><div>{childPickerOptions.map(child=><label key={child}><input type="checkbox" checked={childFilters.includes(child)} onChange={()=>toggleChild(child)}/><code>{child}</code></label>)}{!childPickerOptions.length&&<p className="asin-picker-empty">No child ASIN found.</p>}</div></div>}</div></label>
-        {filtersActive&&<button className="secondary" onClick={()=>{setCustomDateActive(false);setDateRangeOpen(false);setStartDate(minDate);setEndDate(maxDate);setParentFilters([]);setChildFilters([]);setQuery("");setPage(1)}}>Reset filters</button>}
-      </div>
-      <section className="panel table-panel all-sales-table">
+        {pageFiltersActive&&<button className="secondary" onClick={()=>{setParentFilters([]);setChildFilters([]);setQuery("");setPage(1)}}>Reset page filters</button>}
+      </div>}
+      <section className="panel table-panel all-sales-table" id="all-product-sales-table">
         <div className="table-toolbar">
           <PanelHead
-            title="All product sales"
-            subtitle="Amazon order data grouped by reporting month"
+            title={ordersView ? "Order details" : bestSellerView ? "Best-selling products" : hasDailyOrderData ? "Daily product sales" : "All product sales"}
+            subtitle={ordersView ? "Date, order ID, status, ASIN, SKU, product, quantity and item price" : bestSellerView ? "Products ranked by sales for the selected date and product filters" : hasDailyOrderData ? "Daily sales by product for the selected date and product filters" : "Amazon sales records grouped by reporting period"}
           />
           <div className="table-search">
             <Search size={15} />
@@ -1608,41 +1658,23 @@ function AllProductSalesPage({
                 setQuery(e.target.value);
                 setPage(1);
               }}
-              placeholder="Search parent, child ASIN or product…"
+              placeholder={ordersView ? "Search order ID, ASIN, SKU or product…" : "Search parent, child ASIN or product…"}
             />
           </div>
         </div>
-        {rows.length ? (
+        {displayRows.length ? (
           <>
             <div className="table-scroll">
-              <table>
+              <table className={ordersView ? "orders-data-grid" : "product-sales-grid"}>
                 <thead>
                   <tr>
-                    <th>Month</th>
-                    <th>Parent ASIN</th>
-                    <th>Child ASIN</th>
-                    <th>Product</th>
-                    <th>Sales</th>
-                    <th>Orders</th>
-                    <th>Units</th>
+                    {ordersView ? <><th>Order date</th><th>Order ID</th><th>Status</th><th>Parent ASIN</th><th>Child ASIN</th><th>SKU</th><th>Product</th><th>Quantity</th><th>Item price</th></> : <><th>{bestSellerView ? "Rank" : hasDailyOrderData ? "Date" : "Month"}</th><th>Parent ASIN</th><th>Child ASIN</th><th>Product</th><th>Sales</th><th>Orders</th><th>Units</th></>}
                   </tr>
                 </thead>
                 <tbody>
                   {shown.map((r: any, i: number) => (
-                    <tr key={`${r.parentAsin}-${r.childAsin}-${r.month}-${i}`}>
-                      <td>{r.month || "—"}</td>
-                      <td>
-                        <code>{r.parentAsin}</code>
-                      </td>
-                      <td>
-                        <code>{r.childAsin}</code>
-                      </td>
-                      <td>
-                        <strong>{r.title || "—"}</strong>
-                      </td>
-                      <td>{money(Number(r.sales || 0))}</td>
-                      <td>{Number(r.orders || 0).toLocaleString()}</td>
-                      <td>{Number(r.units || 0).toLocaleString()}</td>
+                    <tr key={ordersView ? `${r.orderId || r.amazonOrderId || r["amazon-order-id"]}-${r.childAsin || r.asin}-${i}` : bestSellerView ? `best-${r.asin}` : `${r.parentAsin}-${r.childAsin}-${r.month}-${i}`}>
+                      {ordersView ? <><td data-label="Order date">{r.orderDate || "—"}</td><td data-label="Order ID"><code>{r.orderId || r.amazonOrderId || r["amazon-order-id"] || "—"}</code></td><td data-label="Status">{r.status || r.orderStatus || r.itemStatus || r["order-status"] || "—"}</td><td data-label="Parent ASIN"><code>{r.parentAsin || "—"}</code></td><td data-label="Child ASIN"><code>{r.childAsin || r.asin || "—"}</code></td><td data-label="SKU"><code>{r.sku || "—"}</code></td><td data-label="Product"><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title} size={34}/><strong>{r.title}</strong></div></td><td data-label="Quantity">{Number(r.quantity || r.units || 0).toLocaleString()}</td><td data-label="Item price">{money(Number(r.itemPrice || r.sales || 0))}</td></> : <><td>{bestSellerView ? (page - 1) * pageSize + i + 1 : r.date || r.month || "—"}</td><td><code>{r.parentAsin}</code></td><td><code>{r.childAsin}</code></td><td><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title || r.childAsin} size={34}/><strong>{r.title || r.childAsin || "—"}</strong></div></td><td>{money(Number(r.sales || 0))}</td><td>{Number(r.orders || 0).toLocaleString()}</td><td>{Number(r.units || 0).toLocaleString()}</td></>}
                     </tr>
                   ))}
                 </tbody>
@@ -1651,16 +1683,16 @@ function AllProductSalesPage({
             <Pager
               page={page}
               pages={pages}
-              total={rows.length}
+              total={displayRows.length}
               pageSize={pageSize}
               onChange={setPage}
-              label="sales records"
+              label={bestSellerView ? "products" : "sales records"}
             />
           </>
         ) : (
           <EmptyState
-            title="No product sales available"
-            body="Click Pull now to retrieve Amazon order data, then refresh this page when the pull completes."
+            title={ordersView ? "No order details available" : bestSellerView ? "No best-selling products available" : "No product sales available"}
+            body={ordersView ? `${orderDataPeriod} No order details match the selected date and products.` : globalRangeActive ? `${salesDataPeriod} No daily order sales match the selected date and products.` : `${salesDataPeriod} Daily order sales will appear after a successful Amazon sync.`}
           />
         )}
       </section>
@@ -1678,6 +1710,7 @@ function ProductDetailsPage({
   onBack: () => void;
   notify: (a: string, b: string) => void;
 }) {
+  const { startDate: globalStartDate, endDate: globalEndDate } = useGlobalDateRange();
   const daily = (data.dailySales || []).map((row: any) => ({
     date: row.date,
     label: row.date,
@@ -1710,19 +1743,14 @@ function ProductDetailsPage({
         : `2026-${String(monthOrder.indexOf(month.slice(0, 3).toLowerCase()) + 1).padStart(2, "0")}-01`;
       return { date, label: month, sales: Number(row[product.parent] || 0) };
     });
-  const usesMonthly = data.granularity === "monthly";
   const hasDailyData = daily.length > 0;
-  const available = hasDailyData ? daily : monthly;
-  const minDate = available[0]?.date || "";
-  const maxDate = available.at(-1)?.date || "";
   const [period, setPeriod] = useState<"Daily" | "Weekly" | "Monthly">(
-    usesMonthly ? "Monthly" : "Daily",
+    data.granularity === "monthly" ? "Monthly" : "Daily",
   );
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [draftFrom, setDraftFrom] = useState("");
-  const [draftTo, setDraftTo] = useState("");
-  const [dateRangeOpen, setDateRangeOpen] = useState(false);
+  const usesMonthly = period === "Monthly";
+  const globalRangeActive = Boolean(globalStartDate && globalEndDate && globalStartDate <= globalEndDate);
+  const from = globalRangeActive ? globalStartDate : "";
+  const to = globalRangeActive ? globalEndDate : "";
   const [childrenOpen, setChildrenOpen] = useState(false);
   const [childAsinPage, setChildAsinPage] = useState(1);
   const childAsinPageSize = 10;
@@ -1775,8 +1803,19 @@ function ProductDetailsPage({
     (period === "Daily" || period === "Weekly") && !hasDailyData;
   const series = unavailable
     ? []
-    : from && to
-      ? base.filter((row) => row.date >= from && row.date <= to)
+    : globalRangeActive
+      ? base.filter((row: any) => {
+          if (Array.isArray(row.sourceDates)) return row.sourceDates.some((date: string) => date >= from && date <= to);
+          if (period === "Monthly") {
+            const monthStart = `${String(row.date || "").slice(0, 7)}-01`;
+            const monthEndDate = new Date(`${monthStart}T00:00:00`);
+            if (Number.isNaN(monthEndDate.getTime())) return false;
+            monthEndDate.setMonth(monthEndDate.getMonth() + 1, 0);
+            const monthEnd = `${monthEndDate.getFullYear()}-${String(monthEndDate.getMonth() + 1).padStart(2, "0")}-${String(monthEndDate.getDate()).padStart(2, "0")}`;
+            return monthStart <= to && monthEnd >= from;
+          }
+          return row.date >= from && row.date <= to;
+        })
       : base;
   const recordDate = (record: any) => {
     const value = String(record.date || record.month || "").trim();
@@ -1809,84 +1848,54 @@ function ProductDetailsPage({
     }
     return 0;
   };
-  const orderIdentity = (record: any) =>
-    String(
-      record?.orderId ??
-        record?.amazonOrderId ??
-        record?.amazon_order_id ??
-        record?.["amazon-order-id"] ??
-        "",
-    ).trim();
+  const aggregateSalesRecords = (period === "Monthly" ? data.salesRecords || [] : data.dailySalesRecords || [])
+    .filter((record: any) => record.parentAsin === product.parent);
   const monthlyRows = series.map((row) => {
     const sourceDates = Array.isArray((row as any).sourceDates)
       ? new Set((row as any).sourceDates)
       : null;
-    const source = (detailOrders.length ? detailOrders : data.salesRecords || []).filter(
-      (record: any) =>
-        detailOrders.length
-          ? orderMatchesPoint(record, row)
-          : record.parentAsin === product.parent &&
-            (row.label && period === "Monthly"
-              ? String(record.month) === String(row.label)
-              : sourceDates
-                ? sourceDates.has(recordDate(record))
-                : recordDate(record) === row.date),
-    );
-    const rowUnits = source.reduce(
-      (sum: number, record: any) =>
-        sum +
-        numberFromOrder(record, [
-          "quantity",
-          "units",
-          "unitsOrdered",
-          "quantityOrdered",
-        ]),
-      0,
-    );
-    const knownOrderIds = new Set(source.map(orderIdentity).filter(Boolean));
-    const rowOrders = detailOrders.length
-      ? knownOrderIds.size || source.length
-      : source.reduce(
-          (sum: number, record: any) =>
-            sum + numberFromOrder(record, ["orders", "orderCount", "ordersOrdered"]),
-          0,
-        );
+    const source = aggregateSalesRecords.filter((record: any) => period === "Monthly"
+      ? recordDate(record).slice(0, 7) === String(row.date || "").slice(0, 7)
+      : sourceDates
+        ? sourceDates.has(String(record.date || ""))
+        : String(record.date || "") === String(row.date || ""));
     return {
       ...row,
-      units: rowUnits,
-      orders: rowOrders,
+      units: source.reduce((sum: number, record: any) => sum + numberFromOrder(record, ["units", "quantity"]), 0),
+      orders: source.reduce((sum: number, record: any) => sum + numberFromOrder(record, ["orders", "orderCount"]), 0),
     };
   });
   const sales = monthlyRows.reduce((sum, row) => sum + Number(row.sales || 0), 0);
   const orders = monthlyRows.reduce((sum, row) => sum + Number(row.orders || 0), 0);
   const units = monthlyRows.reduce((sum, row) => sum + Number(row.units || 0), 0);
-  const changeFor = (values: number[]) => {
-    if (values.length < 2) return { label: "N/A", up: true };
-    const previous = values.at(-2) || 0;
-    const current = values.at(-1) || 0;
-    const change = ((current - previous) / Math.max(Math.abs(previous), 1)) * 100;
-    return { label: `${Math.abs(change).toFixed(1)}%`, up: change >= 0 };
-  };
-  const salesChange = changeFor(monthlyRows.map((row) => Number(row.sales || 0)));
-  const ordersChange = changeFor(monthlyRows.map((row) => Number(row.orders || 0)));
-  const unitsChange = changeFor(monthlyRows.map((row) => Number(row.units || 0)));
+  const averageOrderValue = orders ? sales / orders : 0;
+  const latestProductPeriod = monthlyRows.at(-1);
+  const previousProductPeriod = monthlyRows.at(-2);
+  const latestChange = latestProductPeriod && previousProductPeriod
+    ? Number(latestProductPeriod.sales || 0) - Number(previousProductPeriod.sales || 0)
+    : null;
+  const latestChangePercent = latestChange != null && Number(previousProductPeriod?.sales || 0) !== 0
+    ? latestChange / Number(previousProductPeriod?.sales || 1) * 100
+    : null;
   const exportDetails = () => {
-    const selectedPeriods = new Set(
-      series.map((row) => String(row.label || row.date)),
-    );
-    const records = (data.salesRecords || []).filter(
-      (record: any) =>
-        record.parentAsin === product.parent &&
-        (!usesMonthly || selectedPeriods.has(String(record.month))),
-    );
+    const selectedPeriods = new Set(series.map((row) => String(row.label || row.date)));
+    const records = (period === "Monthly" ? data.salesRecords || [] : data.dailySalesRecords || [])
+      .filter((record: any) => record.parentAsin === product.parent)
+      .flatMap((record: any) => {
+        const matchingPeriod = series.find((row: any) => period === "Monthly"
+          ? recordDate(record).slice(0, 7) === String(row.date || "").slice(0, 7)
+          : Array.isArray(row.sourceDates)
+            ? row.sourceDates.includes(String(record.date))
+            : String(record.date) === String(row.date));
+        if (!matchingPeriod || !selectedPeriods.has(String(matchingPeriod.label || matchingPeriod.date))) return [];
+        return [{ ...record, reportPeriod: period === "Monthly" ? record.month : matchingPeriod.label || matchingPeriod.date }];
+      });
     const childInfo = new Map(
       product.children.map((child: any) => [child.asin, child]),
     );
     const grouped = new Map<string, any>();
     for (const record of records) {
-      const periodLabel = String(
-        record.month || record.date || "Selected period",
-      );
+      const periodLabel = String(record.reportPeriod || record.month || record.date || "Selected period");
       const key = `${periodLabel}::${record.childAsin}`;
       const current = grouped.get(key) || {
         period: periodLabel,
@@ -1980,76 +1989,13 @@ function ProductDetailsPage({
           </p>
         </div>
         <button
-          className="primary"
+          className="primary dashboard-export-button"
           onClick={exportDetails}
           disabled={!series.length}
         >
           <Download /> Export CSV
         </button>
       </div>
-      <section className="panel product-detail-filter">
-        <div className="filter-group">
-          <label>Time interval</label>
-          <div className="segments">
-            {(["Daily", "Weekly", "Monthly"] as const).map(
-              (option) => (
-                <button
-                  key={option}
-                  className={period === option ? "active" : ""}
-                  onClick={() => setPeriod(option)}
-                >
-                  {option}
-                </button>
-              ),
-            )}
-          </div>
-        </div>
-        <div className="filter-group date product-detail-date-picker">
-          <label>Date range</label>
-          <div className="date-range-picker">
-            <button
-              type="button"
-              className={dateRangeOpen ? "open" : ""}
-              disabled={!minDate || !maxDate}
-              onClick={() => {
-                setDraftFrom(from);
-                setDraftTo(to);
-                setDateRangeOpen((open) => !open);
-              }}
-            >
-              <CalendarDays size={16} />
-              <span>
-                {from && to
-                  ? `${new Date(`${from}T00:00:00`).toLocaleDateString("en-US")} — ${new Date(`${to}T00:00:00`).toLocaleDateString("en-US")}`
-                  : "Select date"}
-              </span>
-              <ChevronDown size={15} />
-            </button>
-            {dateRangeOpen && (
-              <div className="date-calendar-menu product-detail-date-menu">
-                <div className="calendar-title">
-                  <div><b>Select date range</b><small>Choose start and end dates</small></div>
-                  <CalendarDays size={19} />
-                </div>
-                <div className="calendar-fields">
-                  <label>Start date<input type="date" value={draftFrom} min={minDate} max={draftTo || maxDate} onChange={(event) => setDraftFrom(event.target.value)} /></label>
-                  <ArrowRight className="calendar-arrow" />
-                  <label>End date<input type="date" value={draftTo} min={draftFrom || minDate} max={maxDate} onChange={(event) => setDraftTo(event.target.value)} /></label>
-                </div>
-                <div className="calendar-actions">
-                  <button className="calendar-cancel" type="button" onClick={() => setDateRangeOpen(false)}>Cancel</button>
-                  <button className="calendar-apply" type="button" disabled={!draftFrom || !draftTo || draftFrom > draftTo} onClick={() => { setFrom(draftFrom); setTo(draftTo); setDateRangeOpen(false); }}>Apply</button>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-        <span>
-          {usesMonthly
-            ? "Monthly source data"
-            : `Sheet data: ${minDate} to ${maxDate}`}
-        </span>
-      </section>
       {usesMonthly && !hasDailyData && (
         <div className="data-banner">
           <FileSpreadsheet size={16} />
@@ -2059,12 +2005,25 @@ function ProductDetailsPage({
           </span>
         </div>
       )}
+      <div className="product-detail-period-control" role="group" aria-label="Sales period">
+        {(["Daily", "Weekly", "Monthly"] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            className={period === value ? "active" : ""}
+            aria-pressed={period === value}
+            disabled={value !== "Monthly" && !hasDailyData}
+            onClick={() => setPeriod(value)}
+          >
+            {value}
+          </button>
+        ))}
+        {!hasDailyData && <small>Daily and weekly views need order records with actual dates.</small>}
+      </div>
       <div className="kpi-grid product-detail-kpis">
         <Kpi
           label="Gross sales"
           value={money(sales)}
-          change={salesChange.label}
-          up={salesChange.up}
           color="cyan"
           icon={<CircleDollarSign />}
           spark={monthlyRows.map((row) => Number(row.sales || 0))}
@@ -2072,8 +2031,6 @@ function ProductDetailsPage({
         <Kpi
           label="Orders"
           value={orders.toLocaleString()}
-          change={ordersChange.label}
-          up={ordersChange.up}
           color="indigo"
           icon={<FileCheck2 />}
           spark={monthlyRows.map((row) => Number(row.orders || 0))}
@@ -2081,8 +2038,6 @@ function ProductDetailsPage({
         <Kpi
           label="Units sold"
           value={units.toLocaleString()}
-          change={unitsChange.label}
-          up={unitsChange.up}
           color="emerald"
           icon={<Boxes />}
           spark={monthlyRows.map((row) => Number(row.units || 0))}
@@ -2090,45 +2045,77 @@ function ProductDetailsPage({
         <Kpi
           label="Child ASINs"
           value={product.children.length.toString()}
-          change="Imported"
-          up
           color="amber"
           icon={<Layers3 />}
           spark={monthlyRows.map(() => product.children.length)}
         />
       </div>
+      <ProductReviewCards key={product.parent} asin={product.parent} />
       <section className="panel product-detail-chart">
         <PanelHead
-          title={`${period} sales performance`}
-          subtitle={from && to ? `${from} to ${to}` : "Selected report interval"}
+          title="Performance"
+          subtitle={`Sales and orders over time · ${from && to ? `${from} – ${to}` : "Selected report interval"}`}
         />
+        <div className="sales-chart-summary">
+          <div><span><i className="sales-color-orange" />Gross sales</span><strong>{money(sales)}</strong></div>
+          <div><span><i className="sales-color-blue" />Orders</span><strong>{orders.toLocaleString("en-US")}</strong></div>
+          <div><span>Units sold</span><strong>{units.toLocaleString("en-US")}</strong></div>
+          <div><span><i className="sales-color-violet" />Average order value</span><strong>{money(averageOrderValue)}</strong></div>
+        </div>
         {series.length ? (
           <div className="chart-area">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={series}>
+              <ComposedChart data={monthlyRows} margin={{ top: 8, right: 14, left: 4, bottom: 0 }}>
                 <CartesianGrid stroke="#e6edf5" vertical={false} />
                 <XAxis
                   dataKey="label"
                   axisLine={false}
                   tickLine={false}
                   tick={{ fontSize: 10, fill: "#718096" }}
+                  interval="preserveStartEnd"
                 />
                 <YAxis
+                  yAxisId="sales"
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(v) => `$${Math.round(v / 1000)}k`}
+                  tickFormatter={(v) => money(v)}
+                  tick={{ fontSize: 10, fill: "#718096" }}
+                  width={76}
                 />
-                <ChartTooltip />
-                <Area
+                <YAxis
+                  yAxisId="count"
+                  orientation="right"
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(value) => Number(value).toLocaleString("en-US")}
+                  tick={{ fontSize: 10, fill: "#718096" }}
+                  width={62}
+                />
+                <ChartTooltip content={<SalesPerformanceTooltip />} />
+                <Bar yAxisId="count" dataKey="units" name="Units sold" radius={[3, 3, 0, 0]} maxBarSize={30}>
+                  {monthlyRows.map((point: any, index: number) => <Cell key={`${point.label}-${index}`} fill="#c6ece7" />)}
+                </Bar>
+                <Line
+                  yAxisId="count"
+                  type="monotone"
+                  dataKey="orders"
+                  name="Orders"
+                  stroke="#5278ff"
+                  strokeWidth={2.5}
+                  dot={false}
+                  activeDot={false}
+                />
+                <Line
+                  yAxisId="sales"
                   type="monotone"
                   dataKey="sales"
-                  stroke="#0891b2"
-                  strokeWidth={2.5}
-                  fill="#22d3ee"
-                  fillOpacity={0.14}
-                  dot={series.length === 1 ? { r: 4, fill: "#0891b2", stroke: "white", strokeWidth: 2 } : false}
+                  name="Gross sales"
+                  stroke="#ff713d"
+                  strokeWidth={2.8}
+                  dot={false}
+                  activeDot={false}
                 />
-              </AreaChart>
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         ) : (
@@ -2137,6 +2124,12 @@ function ProductDetailsPage({
             body="Choose a date range that contains uploaded report data."
           />
         )}
+        {latestProductPeriod && <div className="chart-foot">
+          <span><b>{money(latestProductPeriod.sales || 0)}</b> sales in latest {period.toLowerCase()}</span>
+          <span className={latestChange == null ? "muted-text" : latestChange >= 0 ? "positive" : "negative"}>
+            {latestChange == null ? "No previous-period baseline" : <>{latestChange >= 0 ? <ArrowUpRight size={14}/> : <ArrowDownRight size={14}/>} {money(Math.abs(latestChange))} ({latestChangePercent == null ? "no % baseline" : `${latestChangePercent >= 0 ? "+" : "−"}${Math.abs(latestChangePercent).toFixed(1)}%`}) vs. previous {period.toLowerCase()}</>}
+          </span>
+        </div>}
       </section>
       <MonthlySalesTable
         rows={monthlyRows}
@@ -2164,7 +2157,6 @@ function ProductDetailsPage({
                 <th>Product</th>
                 <th>ASIN</th>
                 <th>Relationship</th>
-                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -2178,12 +2170,6 @@ function ProductDetailsPage({
                 <td>
                   <span className="relation-pill parent">Parent ASIN</span>
                 </td>
-                <td>
-                  <span className="status active">
-                    <i />
-                    Active
-                  </span>
-                </td>
               </tr>
               {childrenOpen &&
                 visibleChildAsins.map((child: any) => (
@@ -2194,18 +2180,6 @@ function ProductDetailsPage({
                     </td>
                     <td>
                       <span className="relation-pill child">Child ASIN</span>
-                    </td>
-                    <td>
-                      <span
-                        className={
-                          child.status === "Active"
-                            ? "status active"
-                            : "status previous"
-                        }
-                      >
-                        <i />
-                        {child.status}
-                      </span>
                     </td>
                   </tr>
                 ))}
@@ -2402,16 +2376,12 @@ function MonthlySalesTable({
 function Kpi({
   label,
   value,
-  change,
-  up,
   color,
   icon,
   spark,
 }: {
   label: string;
   value: string;
-  change: string;
-  up: boolean;
   color: string;
   icon: any;
   spark: number[];
@@ -2426,10 +2396,6 @@ function Kpi({
       <span>{label}</span>
       <div className="kpi-value">
         <b>{value}</b>
-        <em className={up ? "positive" : "negative"}>
-          {up ? <ArrowUpRight /> : <ArrowDownRight />}
-          {change}
-        </em>
       </div>
       <div className="spark">
         <ResponsiveContainer width="100%" height="100%">
@@ -2445,7 +2411,6 @@ function Kpi({
           </AreaChart>
         </ResponsiveContainer>
       </div>
-      <small>vs. previous period</small>
     </div>
   );
 }
@@ -2470,16 +2435,37 @@ function PanelHead({
 }
 function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
+  const point = payload[0]?.payload;
   return (
     <div className="chart-tooltip">
       <span>{label}</span>
-      {payload.map((p: any) => (
-        <div key={p.dataKey}>
-          <i style={{ background: p.color || p.stroke }} />
-          <b>{p.name || "Gross sales"}</b>
-          <strong>{money(p.value)}</strong>
+      {typeof point?.total === "number" && (
+        <div>
+          <i style={{ background: "#0891b2" }} />
+          <b>Total sales</b>
+          <strong>{money(point.total)}</strong>
         </div>
-      ))}
+      )}
+      {point?.changeAmount != null && (
+        <div className={point.changeAmount >= 0 ? "positive" : "negative"}>
+          <i style={{ background: point.changeAmount >= 0 ? "#35bdb4" : "#ff713d" }} />
+          <b>vs. previous period</b>
+          <strong>{point.changeAmount >= 0 ? "+" : "−"}{money(Math.abs(point.changeAmount))}{point.changePercent == null ? "" : ` (${point.changePercent >= 0 ? "+" : "−"}${Math.abs(point.changePercent).toFixed(1)}%)`}</strong>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SalesPerformanceTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0]?.payload;
+  return (
+    <div className="chart-tooltip sales-performance-tooltip">
+      <span>{label}</span>
+      <div><i style={{ background: "#ff713d" }} /><b>Gross sales</b><strong>{money(Number(point?.sales || 0))}</strong></div>
+      <div><i style={{ background: "#5278ff" }} /><b>Orders</b><strong>{Number(point?.orders || 0).toLocaleString("en-US")}</strong></div>
+      <div><i style={{ background: "#c6ece7" }} /><b>Units sold</b><strong>{Number(point?.units || 0).toLocaleString("en-US")}</strong></div>
     </div>
   );
 }
@@ -2493,6 +2479,8 @@ function TrackingPage({
   notify: (a: string, b: string) => void;
   account: AccountId;
 }) {
+  const { startDate: globalStartDate, endDate: globalEndDate, selectedProductParents } = useGlobalDateRange();
+  const globalRangeActive = Boolean(globalStartDate && globalEndDate && globalStartDate <= globalEndDate);
   const [expanded, setExpanded] = useState<string[]>(["P-1001"]);
   const [drawer, setDrawer] = useState<any>(null);
   const [review, setReview] = useState<any>(null);
@@ -2506,16 +2494,18 @@ function TrackingPage({
   const catalogPageSize = 15;
   const [asinChangePage, setAsinChangePage] = useState(1);
   const changePageSize = 5;
-  const availableDates = (data.dailySales || [])
-    .map((r: any) => r.date)
-    .filter(Boolean);
-  const sheetStart = availableDates[0] || "2026-05-13";
-  const sheetEnd = availableDates.at(-1) || "2026-08-11";
-  const [trackingStart, setTrackingStart] = useState(sheetStart);
-  const [trackingEnd, setTrackingEnd] = useState(sheetEnd);
-  const [trackingDraftStart, setTrackingDraftStart] = useState(sheetStart);
-  const [trackingDraftEnd, setTrackingDraftEnd] = useState(sheetEnd);
-  const [trackingCalendarOpen, setTrackingCalendarOpen] = useState(false);
+  const isInGlobalRange = (value: unknown) => {
+    if (!globalRangeActive) return true;
+    if (!value) return false;
+    const raw = String(value);
+    const date = /^\d{4}-\d{2}-\d{2}/.test(raw)
+      ? raw.slice(0, 10)
+      : Number.isFinite(new Date(raw).getTime())
+        ? new Date(raw).toISOString().slice(0, 10)
+        : "";
+    return Boolean(date && date >= globalStartDate && date <= globalEndDate);
+  };
+  useEffect(() => { setCatalogPage(1); setAsinChangePage(1); }, [globalStartDate, globalEndDate, selectedProductParents]);
   useEffect(() => setChanges(data.asinChanges || []), [data.asinChanges]);
   const toggle = (id: string) =>
     setExpanded((x) =>
@@ -2549,7 +2539,6 @@ function TrackingPage({
       notify(
         "Merge all failed",
         error instanceof Error ? error.message : "Please try again.",
-        "warning",
       );
     } finally {
       setMergingAll(false);
@@ -2570,7 +2559,7 @@ function TrackingPage({
       })
     : [];
   const rangeSales = (data.dailySales || [])
-    .filter((r: any) => r.date >= trackingStart && r.date <= trackingEnd)
+    .filter((r: any) => !globalRangeActive || (r.date >= globalStartDate && r.date <= globalEndDate))
     .reduce((totals: any, row: any) => {
       Object.keys(row).forEach((key) => {
         if (key !== "date")
@@ -2579,13 +2568,22 @@ function TrackingPage({
       return totals;
     }, {});
   const hasDailySource = (data.dailySales || []).length > 0;
-  const filteredProducts = hasDailySource
+  const filteredProducts = (hasDailySource
     ? data.products.filter((p: any) => Number(rangeSales[p.parent] || 0) > 0)
-    : data.products;
-  const filteredMissing = data.missingAsins || [];
-  const filteredChanges = changes;
+    : data.products).filter((product: any) => !selectedProductParents.length || selectedProductParents.includes(product.parent));
+  const selectedProductRecords = (rows: any[]) => rows.filter((row: any) => {
+    if (!selectedProductParents.length) return true;
+    const product = data.products.find((candidate: any) => selectedProductParents.includes(candidate.parent) && (
+      String(row.product || "").trim().toLowerCase() === String(candidate.name || "").trim().toLowerCase() ||
+      String(row.parentSku || "").trim().toLowerCase() === String(candidate.parentSku || "").trim().toLowerCase() ||
+      (candidate.children || []).some((child: any) => [child.asin, child.sku].some((value) => value && [row.asin, row.current, row.previous, row.sku].some((id) => String(id || "").toUpperCase() === String(value).toUpperCase())))
+    ));
+    return Boolean(product);
+  });
+  const filteredMissing = selectedProductRecords((data.missingAsins || []).filter((row: any) => isInGlobalRange(row.detectedAt || row.detected || row.date)));
+  const filteredChanges = selectedProductRecords(changes.filter((row: any) => isInGlobalRange(row.detectedAt || row.detected || row.date)));
   const filteredHistory = data.asinHistory?.length
-    ? data.asinHistory
+    ? selectedProductRecords(data.asinHistory.filter((row: any) => isInGlobalRange(row.mergedAt || row.detectedAt || row.date)))
     : filteredChanges
         .filter((c: any) => c.status === "Merged")
         .map((c: any) => ({
@@ -2695,9 +2693,9 @@ function TrackingPage({
   );
   const asinChangePages = Math.max(
     1,
-    Math.ceil(changes.length / changePageSize),
+    Math.ceil(filteredChanges.length / changePageSize),
   );
-  const visibleAsinChanges = changes.slice(
+  const visibleAsinChanges = filteredChanges.slice(
     (asinChangePage - 1) * changePageSize,
     asinChangePage * changePageSize,
   );
@@ -3076,98 +3074,6 @@ function TrackingPage({
   });
   return (
     <>
-      <div className="tracking-filter-row">
-        <div className="filter-group date date-range-picker">
-          <label>Date range</label>
-          <button
-            className={trackingCalendarOpen ? "open" : ""}
-            onClick={() => {
-              setTrackingDraftStart(trackingStart);
-              setTrackingDraftEnd(trackingEnd);
-              setTrackingCalendarOpen((x) => !x);
-            }}
-          >
-            <CalendarDays size={16} />
-            <span>
-              {new Date(`${trackingStart}T00:00:00`).toLocaleDateString(
-                "en-US",
-                { month: "short", day: "numeric", year: "numeric" },
-              )}{" "}
-              —{" "}
-              {new Date(`${trackingEnd}T00:00:00`).toLocaleDateString("en-US", {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-              })}
-            </span>
-            <ChevronDown size={15} />
-          </button>
-          {trackingCalendarOpen && (
-            <div className="date-calendar-menu">
-              <div className="calendar-title">
-                <div>
-                  <b>Select tracking date range</b>
-                  <small>
-                    Available sheet data: {sheetStart} to {sheetEnd}
-                  </small>
-                </div>
-                <CalendarDays size={19} />
-              </div>
-              <div className="calendar-fields">
-                <label>
-                  <span>Start date</span>
-                  <input
-                    type="date"
-                    value={trackingDraftStart}
-                    min={sheetStart}
-                    max={trackingDraftEnd}
-                    onChange={(e) => setTrackingDraftStart(e.target.value)}
-                  />
-                </label>
-                <span className="calendar-arrow">→</span>
-                <label>
-                  <span>End date</span>
-                  <input
-                    type="date"
-                    value={trackingDraftEnd}
-                    min={trackingDraftStart}
-                    max={sheetEnd}
-                    onChange={(e) => setTrackingDraftEnd(e.target.value)}
-                  />
-                </label>
-              </div>
-              <div className="calendar-actions tracking-calendar-actions">
-                <button
-                  className="calendar-cancel"
-                  onClick={() => setTrackingCalendarOpen(false)}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="calendar-apply"
-                  disabled={
-                    !trackingDraftStart ||
-                    !trackingDraftEnd ||
-                    trackingDraftStart > trackingDraftEnd
-                  }
-                  onClick={() => {
-                    setTrackingStart(trackingDraftStart);
-                    setTrackingEnd(trackingDraftEnd);
-                    setTrackingCalendarOpen(false);
-                    setCatalogPage(1);
-                    notify(
-                      "Tracking filter applied",
-                      `${trackingDraftStart} to ${trackingDraftEnd}`,
-                    );
-                  }}
-                >
-                  Apply range
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
       <div className="tracking-stats tracking-stats-five">
         <div className="clickable-stat" {...open("parents")}>
           <span className="stat-icon cyan">
@@ -3313,7 +3219,7 @@ function TrackingPage({
                 placeholder="Search product, ASIN or attribute…"
               />
             </div>
-            <button className="secondary" onClick={exportCatalog}>
+            <button className="secondary dashboard-export-button" onClick={exportCatalog}>
               <Download /> Export CSV
             </button>
           </div>
@@ -3732,7 +3638,7 @@ function MissingAsinView({
             latest uploaded catalog.
           </p>
         </div>
-        <button className="primary" disabled={!rows.length} onClick={exportCsv}>
+        <button className="primary dashboard-export-button" disabled={!rows.length} onClick={exportCsv}>
           <Download /> Export CSV
         </button>
       </div>
@@ -4041,7 +3947,7 @@ function AttributeChangesView({
             uploads.
           </p>
         </div>
-        <button className="primary" disabled={!rows.length} onClick={exportCsv}>
+        <button className="primary dashboard-export-button" disabled={!rows.length} onClick={exportCsv}>
           <Download /> Export CSV
         </button>
       </div>
@@ -4210,6 +4116,8 @@ function Pager({
   onChange,
   variant,
   label,
+  pageSizeOptions,
+  onPageSizeChange,
 }: {
   page: number;
   pages: number;
@@ -4218,8 +4126,10 @@ function Pager({
   onChange: (page: number) => void;
   variant?: "attribute";
   label?: string;
+  pageSizeOptions?: number[];
+  onPageSizeChange?: (pageSize: number) => void;
 }) {
-  if (pages <= 1) return null;
+  if (pages <= 1 && !pageSizeOptions) return null;
   const visible = Array.from({ length: pages }, (_, i) => i + 1).filter(
     (n) => n === 1 || n === pages || Math.abs(n - page) <= 1,
   );
@@ -4230,6 +4140,8 @@ function Pager({
         of {total}
         {label ? ` ${label}` : ""}
       </span>
+      <div className="pagination-actions">
+      {pageSizeOptions && onPageSizeChange && <label className="page-size-control">Products per page<select aria-label="Products per page" value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}>{pageSizeOptions.map((size) => <option key={size} value={size}>{size}</option>)}</select></label>}
       <div className="page-controls">
         <button
           aria-label="First page"
@@ -4271,6 +4183,7 @@ function Pager({
         >
           <ChevronsRight size={15} />
         </button>
+      </div>
       </div>
     </div>
   );
@@ -4672,7 +4585,7 @@ function TrackingRecordsView({
           <h2>{config.title}</h2>
           <p>{config.subtitle}</p>
         </div>
-        <button className="primary" disabled={!rows.length} onClick={exportCsv}>
+        <button className="primary dashboard-export-button" disabled={!rows.length} onClick={exportCsv}>
           <Download /> Export CSV
         </button>
       </div>

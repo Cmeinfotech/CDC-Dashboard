@@ -1,20 +1,22 @@
 param(
-  [string]$Time = "09:00",
+  [int]$IntervalMinutes = 30,
   [string]$TimeZone = "Asia/Kolkata"
 )
 
 $ErrorActionPreference = 'Stop'
-if ($Time -notmatch '^(?:[01]\d|2[0-3]):[0-5]\d$') { throw 'Time must use HH:MM 24-hour format.' }
+if ($IntervalMinutes -lt 5 -or $IntervalMinutes -gt 1440) { throw 'IntervalMinutes must be between 5 and 1440.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $script = Join-Path $PSScriptRoot 'amazon-daily-sync.mjs'
+$hiddenRunner = Join-Path $PSScriptRoot 'run-amazon-daily-sync-hidden.vbs'
 $taskName = 'CDC Amazon Daily Sync'
-$arguments = ('"{0}" --time {1} --timezone "{2}"' -f $script, $Time, $TimeZone)
-$trigger = New-ScheduledTaskTrigger -Daily -At ([DateTime]::ParseExact($Time, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture))
-$action = New-ScheduledTaskAction -Execute $node -Argument $arguments -WorkingDirectory $projectRoot
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Description 'Daily CDC Amazon SP-API catalog, listings, and Account Health sync.' -Force | Out-Null
+$arguments = ('"{0}" "{1}" "{2}" --interval-minutes {3} --timezone "{4}"' -f $hiddenRunner, $node, $script, $IntervalMinutes, $TimeZone)
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($IntervalMinutes) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
+$action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument $arguments -WorkingDirectory $projectRoot
+$settings = New-ScheduledTaskSettingsSet -Priority 4 -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 0 -ExecutionTimeLimit (New-TimeSpan -Minutes ($IntervalMinutes - 1))
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Description 'CDC Amazon SP-API catalog, listings, Account Health, and recent orders sync.' -Force -ErrorAction Stop | Out-Null
 
-& $node $script --configure --time $Time --timezone $TimeZone
+& $node $script --configure --interval-minutes $IntervalMinutes --timezone $TimeZone
 if ($LASTEXITCODE -ne 0) { throw 'Task was created, but the dashboard automation status could not be saved.' }
 
-Write-Output "Created '$taskName' to run daily at $Time $TimeZone."
+Write-Output "Created '$taskName' to run every $IntervalMinutes minutes ($TimeZone). First scheduled run starts in $IntervalMinutes minutes; an on-demand run can be started immediately."

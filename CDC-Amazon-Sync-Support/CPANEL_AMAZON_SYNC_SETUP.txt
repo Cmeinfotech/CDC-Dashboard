@@ -1,0 +1,11 @@
+CDC Dashboard Amazon Sync Support
+
+1. Upload this ZIP to the existing cPanel application root: /home2/oqskkykf/cdc-dashboard
+2. Extract/overwrite the included scripts and services folders and package.json/package-lock.json. Do not overwrite the app's .env file or cPanel environment variables.
+3. In Setup Node.js App, run NPM Install so the root app has the dependencies needed by the sync scripts.
+4. In cPanel Terminal run:
+   source /home2/oqskkykf/nodevenv/cdc-dashboard/22/bin/activate && cd /home2/oqskkykf/cdc-dashboard && npm run amazon:sync
+5. After a successful run, add this command to cPanel Cron Jobs every 30 minutes:
+   source /home2/oqskkykf/nodevenv/cdc-dashboard/22/bin/activate && cd /home2/oqskkykf/cdc-dashboard && npm run amazon:sync
+
+Keep the .env file and all secrets out of this ZIP and do not post secret values in screenshots.

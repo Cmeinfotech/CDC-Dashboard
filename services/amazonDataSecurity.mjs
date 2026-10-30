@@ -61,19 +61,33 @@ export async function purgeExpiredAmazonData(root, now = Date.now()) {
   if (info.isSymbolicLink() || !info.isDirectory()) throw Error('Retention root must be a real directory.');
   async function visit(dir) {
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) continue;
+    for (let offset = 0; offset < entries.length; offset += 8) {
+      await Promise.all(entries.slice(offset, offset + 8).map(async entry => {
+      if (entry.isSymbolicLink()) return;
       const file = path.resolve(dir, entry.name); const relative = path.relative(base, file);
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw Error('Unsafe retention path.');
       if (entry.isDirectory()) await visit(file);
-      else if (entry.name.endsWith('.json')) {
+      else if (entry.name.endsWith('.json') || entry.name.endsWith('.json.bak')) {
+        // Envelopes written by sealAmazonData put expiry before ciphertext.
+        // Inspect that small header first: reading every unexpired snapshot
+        // otherwise scans many gigabytes before a scheduled pull can start.
+        const handle = await fs.open(file, 'r');
+        let header;
+        try {
+          const buffer = Buffer.alloc(256);
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+          header = buffer.toString('utf8', 0, bytesRead);
+        } finally { await handle.close(); }
+        const expiry = header.match(/^\{"format":"cdc-amazon-aes256gcm-v1","expiresAt":(\d+),/);
+        if (expiry && Number.isSafeInteger(Number(expiry[1])) && Number(expiry[1]) > now) return;
         const envelope = JSON.parse(await fs.readFile(file, 'utf8'));
         if (envelope.format === 'cdc-amazon-aes256gcm-v1' && Number.isSafeInteger(envelope.expiresAt) && envelope.expiresAt <= now) {
           // Authenticate metadata before deleting; modified expiry must not cause deletion.
-          openAmazonData(JSON.stringify(envelope), file, null, now);
+          openAmazonData(JSON.stringify(envelope), file.endsWith('.json.bak') ? file.slice(0, -4) : file, null, now);
           await fs.unlink(file); count++;
         }
       }
+      }));
     }
   }
   await visit(base); return count;

@@ -30,3 +30,10 @@ export const asinHistory = mysqlTable("asin_history", {
   id: int("id").autoincrement().primaryKey(), userId: varchar("user_id", { length: 191 }).notNull(), product: varchar("product", { length: 1000 }).notNull(),
   currentAsin: varchar("current_asin", { length: 191 }).notNull(), previousAsin: varchar("previous_asin", { length: 191 }).notNull(), mergedAt: timestamp("merged_at", { mode: "string" }).notNull().defaultNow(),
 }, (table) => [index("asin_history_user_idx").on(table.userId)]);
+
+export const changeAudit = mysqlTable("change_audit", {
+  id: varchar("id", { length: 191 }).primaryKey(), userId: varchar("user_id", { length: 191 }).notNull(), actor: varchar("actor", { length: 191 }).notNull(),
+  action: varchar("action", { length: 64 }).notNull(), entityType: varchar("entity_type", { length: 64 }).notNull(), entityId: varchar("entity_id", { length: 191 }).notNull(),
+  summary: varchar("summary", { length: 1000 }).notNull(), details: json("details").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { mode: "string" }).notNull().defaultNow(),
+}, (table) => [index("change_audit_user_created_idx").on(table.userId, table.createdAt)]);

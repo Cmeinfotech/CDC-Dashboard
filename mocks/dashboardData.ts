@@ -3,9 +3,10 @@ export type Trend = "growing" | "stable" | "declining";
 export type Product = {
   parent: string;
   name: string;
+  image?: string | null;
   category: string;
   trend: Trend;
-  children: { asin: string; label: string; status: "Active" | "Previous" }[];
+  children: { asin: string; label: string; status: "Active" | "Previous"; title?: string; image?: string | null }[];
 };
 
 export const products: Product[] = [

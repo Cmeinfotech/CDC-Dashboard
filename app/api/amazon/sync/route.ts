@@ -18,6 +18,6 @@ export async function POST(request: Request) {
       const child = spawn(process.execPath, [join(process.cwd(), "scripts", "amazon-daily-sync.mjs"), "--now"], { cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: "ignore" });
       child.once("error", reject); child.once("spawn", () => { child.unref(); resolve(); });
     });
-    return Response.json({ status: "starting", message: "Catalog, listings, and Account Health are refreshing. Follow progress in Amazon Change Monitor." }, { status: 202 });
+    return Response.json({ status: "starting", message: "Catalog, listings, and Account Health are refreshing. Follow progress in Product / ASIN Tracking." }, { status: 202 });
   } catch (e) { return Response.json({ error: "Sync failed to start." }, { status: 500 }); }
 }
