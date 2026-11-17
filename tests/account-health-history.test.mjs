@@ -3,7 +3,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { saveHealthSnapshot, healthTrendRows } from '../services/accountHealthHistory.mjs';
+import { saveHealthSnapshot, healthTrendRows, selectHealthSnapshot } from '../services/accountHealthHistory.mjs';
+
+test('date filtering selects the latest real snapshot inside the range without substituting current data', () => {
+  const snapshots = [
+    { reportId: '1', capturedAt: '2026-09-01T10:00:00Z' },
+    { reportId: '2', capturedAt: '2026-10-01T10:00:00Z' },
+    { reportId: '3', capturedAt: '2026-10-01T12:00:00Z' },
+  ];
+  assert.equal(selectHealthSnapshot(snapshots, '2026-10-01', '2026-10-01')?.reportId, '3');
+  assert.equal(selectHealthSnapshot(snapshots, '2024-11-04', '2024-12-31'), null);
+  assert.equal(selectHealthSnapshot(snapshots, '', '')?.reportId, '3');
+});
 test('weekly history uses the latest real snapshot and leaves missing-week changes unavailable', async () => {
   const previous = { root: process.env.AMAZON_MONITOR_DATA_DIR, key: process.env.AMAZON_DATA_KEY };
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'cdc-health-history-'));

@@ -9,9 +9,12 @@ export default defineConfig(() => {
     server: {
       host: "0.0.0.0",
       fs: { deny: ['.env', '.env.*', '*.{crt,pem,key}', '**/.git/**', '**/.auth/**', '**/outputs/**', '**/work/**', '**/data-store/**', '**/.npm-cache/**'] },
-      ...(isCodexSeatbeltSandbox
-        ? { watch: { useFsEvents: false, usePolling: true } }
-      : {}),
+      watch: {
+        // Keep large runtime data and generated artifacts out of Chokidar's
+        // project-wide watcher. The local Amazon snapshots can be many GB.
+        ignored: ["**/data-store/**", "**/work/**", "**/outputs/**", "**/.wrangler/**", "**/.npm-cache/**", "**/.vinext/**", "**/.next/**", "**/dist/**"],
+        ...(isCodexSeatbeltSandbox ? { useFsEvents: false, usePolling: true } : {}),
+      },
     },
     // mysql2 is a Node-only CommonJS driver. Keep it external in local SSR so
     // Vite does not evaluate its CommonJS wrapper as an inlined ESM module.

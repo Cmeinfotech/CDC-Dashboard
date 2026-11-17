@@ -350,7 +350,7 @@ export function buildProducts(business: typeof snapshotRows.$inferSelect[], cata
   });
 }
 
-export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], products: ReturnType<typeof buildProducts>, catalog: typeof snapshotRows.$inferSelect[] = [], orders: typeof snapshotRows.$inferSelect[] = [], amazonOrdersOnly = false, amazonParentByChild = new Map<string, string>()) {
+export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], products: ReturnType<typeof buildProducts>, catalog: typeof snapshotRows.$inferSelect[] = [], orders: typeof snapshotRows.$inferSelect[] = [], amazonOrdersOnly = false, amazonParentByChild = new Map<string, string>(), orderDateRange?: { startDate: string; endDate: string }) {
   const analyticsBusiness = amazonOrdersOnly ? [] : business;
   const monthKey = (value: string) => importDateKey(value) || value;
   const months = [...new Set(analyticsBusiness.map(row => row.month).filter(Boolean))].sort((a, b) => monthKey(a).localeCompare(monthKey(b)));
@@ -536,10 +536,16 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
     childMetricsByAsin.set(asin, summary);
   }
   const childMetrics = Object.fromEntries(childMetricsByAsin);
-  // The database retains every order row. The dashboard receives compact daily
-  // totals and the newest detail rows, avoiding a multi-year response that can
-  // freeze the browser or delay a refresh.
-  const dashboardOrderRecords = orderRecords.length > 10_000 ? orderRecords.slice(-10_000) : orderRecords;
+  // Keep the shared dashboard response compact. The Orders page requests its
+  // selected interval so older orders are not lost behind the detail-row cap.
+  const orderDates = orderRecords.map(row => textValue(row.orderDate)).filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date)).sort();
+  const orderCoverage = { startDate: orderDates[0] || null, endDate: orderDates.at(-1) || null };
+  const selectedOrderRecords = orderDateRange
+    ? orderRecords.filter(row => textValue(row.orderDate) >= orderDateRange.startDate && textValue(row.orderDate) <= orderDateRange.endDate)
+    : orderRecords;
+  const orderRecordsTotal = selectedOrderRecords.length;
+  const orderRecordsTruncated = selectedOrderRecords.length > 10_000;
+  const dashboardOrderRecords = orderRecordsTruncated ? selectedOrderRecords.slice(-10_000) : selectedOrderRecords;
   if (amazonOrdersOnly) {
     for (const row of monthlyOrderRecords.values()) {
       const parent = textValue(row.parentAsin);
@@ -552,10 +558,10 @@ export function buildAnalytics(business: typeof snapshotRows.$inferSelect[], pro
       metrics[parent] = totals;
     }
   }
-  return { products, monthlySales, dailySales, dailySalesRecords: [...dailyOrderRecords.values()], metrics, childMetrics, granularity: dailySales.length ? "daily" : "monthly", salesRecords: monthlyOrderRecords.size ? [...monthlyOrderRecords.values()] : amazonOrdersOnly ? [] : businessSalesRecords, businessSalesRecords, catalogRecords: catalog.map(row => ({ asin: row.asin, sku: textValue(row.data["Parent SKU"]), ...row.data })), orderRecords: dashboardOrderRecords };
+  return { products, monthlySales, dailySales, dailySalesRecords: [...dailyOrderRecords.values()], metrics, childMetrics, granularity: dailySales.length ? "daily" : "monthly", salesRecords: monthlyOrderRecords.size ? [...monthlyOrderRecords.values()] : amazonOrdersOnly ? [] : businessSalesRecords, businessSalesRecords, catalogRecords: catalog.map(row => ({ asin: row.asin, sku: textValue(row.data["Parent SKU"]), ...row.data })), orderRecords: dashboardOrderRecords, orderRecordsTotal, orderRecordsTruncated, orderCoverage };
 }
 
-export async function dashboardData(userId: string) {
+export async function dashboardData(userId: string, orderDateRange?: { startDate: string; endDate: string }) {
   await expireAccountData(userId);
   const { rows: orders } = await amazonOrderHistoryRows(userId);
   // Live dashboard figures are sourced only from the saved Amazon order pull.
@@ -603,7 +609,7 @@ export async function dashboardData(userId: string) {
     };
   }) as typeof amazonOrders;
   const products = buildProducts(amazonOrderProductSource, amazonCatalog, "Latest Amazon product pull");
-  return buildAnalytics([], products, amazonCatalog, amazonOrders, true, amazonParentByChild);
+  return buildAnalytics([], products, amazonCatalog, amazonOrders, true, amazonParentByChild, orderDateRange);
 }
 
 export async function mergeChange(userId: string, id: string, actor = "Unknown user") {

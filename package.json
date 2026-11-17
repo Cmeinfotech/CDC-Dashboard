@@ -6,6 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "zip:transfer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-transfer-zip.ps1",
     "dev": "vite dev --port 3000",
     "build": "vinext build",
     "start": "vinext start",
@@ -16,6 +17,9 @@
     "amazon:sync": "node scripts/amazon-daily-sync.mjs --now",
     "amazon:sync-inventory": "node scripts/pull-amazon-inventory.mjs",
     "amazon:auto-sync": "node scripts/amazon-daily-sync.mjs",
+    "amazon:auto-sync:pause": "node scripts/amazon-daily-sync.mjs --pause",
+    "amazon:auto-sync:pause-today": "node scripts/amazon-daily-sync.mjs --pause-for-today",
+    "amazon:auto-sync:resume": "node scripts/amazon-daily-sync.mjs --resume",
     "amazon:auto-sync:configure": "node scripts/amazon-daily-sync.mjs --configure",
     "amazon:backfill": "node scripts/amazon-two-year-backfill.mjs",
     "amazon:reset-pull-data": "node scripts/reset-amazon-pull-storage.mjs",

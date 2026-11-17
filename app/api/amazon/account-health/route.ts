@@ -4,6 +4,7 @@ import { assertAmazonStorage } from '../../../../services/amazonDataSecurity.mjs
 import { isAmazonConfigured } from '../../../../services/amazonSpApi';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { healthSnapshots, selectHealthSnapshot } from '../../../../services/accountHealthHistory.mjs';
 
 async function state() {
   const root = monitorRoot();
@@ -14,7 +15,15 @@ async function state() {
 }
 export async function GET(request: Request) {
   const denied = accessGuard(request, { amazon: true }); if (denied) return denied;
-  try { return Response.json(await state(), { headers: { 'Cache-Control': 'no-store' } }); }
+  try {
+    const params = new URL(request.url).searchParams;
+    const startDate = params.get('startDate') || '', endDate = params.get('endDate') || '';
+    if ([startDate, endDate].some(value => value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value)))) || startDate && endDate && startDate > endDate) return Response.json({ error: 'Invalid date range.' }, { status: 400 });
+    const current = await state();
+    const snapshots = await healthSnapshots(current.data);
+    if (params.get('view') === 'trend') return Response.json({ snapshots: snapshots.filter((snapshot: { capturedAt: string }) => (!startDate || snapshot.capturedAt.slice(0, 10) >= startDate) && (!endDate || snapshot.capturedAt.slice(0, 10) <= endDate)).map((snapshot: { capturedAt: string; marketplaceId: string; performanceMetrics: { marketplaceId: string; metrics: { category: string; value: unknown }[] }[] }) => ({ capturedAt: snapshot.capturedAt, rating: snapshot.performanceMetrics.find(entry => entry.marketplaceId === snapshot.marketplaceId)?.metrics.find(metric => metric.category === 'accountHealthRating')?.value })) }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json({ ...current, data: startDate || endDate ? selectHealthSnapshot(snapshots, startDate, endDate) : current.data, availableRange: { startDate: snapshots[0]?.capturedAt.slice(0, 10) || '', endDate: snapshots.at(-1)?.capturedAt.slice(0, 10) || '' } }, { headers: { 'Cache-Control': 'no-store' } });
+  }
   catch { return Response.json({ error: 'Account Health data unavailable.' }, { status: 500 }); }
 }
 export async function POST(request: Request) {

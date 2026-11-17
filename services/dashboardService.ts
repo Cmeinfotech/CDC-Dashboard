@@ -40,6 +40,10 @@ async function api<T>(url: string, init?: RequestInit, accountId: AccountId = "c
   finally { pendingRequests.delete(key); }
 }
 export const getDashboardData = (accountId: AccountId = "cdc") => api<any>("/api/dashboard", undefined, accountId);
+export const getAmazonOrderRecords = (startDate: string, endDate: string, accountId: AccountId = "cdc") => {
+  const query = new URLSearchParams({ startDate, endDate });
+  return api<{ orderRecords: any[]; total: number; truncated: boolean; orderCoverage: { startDate: string | null; endDate: string | null } }>(`/api/orders?${query}`, undefined, accountId, 0);
+};
 export const getTrackingData = (accountId: AccountId = "cdc") => api<any>("/api/tracking", undefined, accountId);
 export const getUploadHistory = (accountId: AccountId = "cdc") => api<any[]>("/api/uploads", undefined, accountId);
 export const getChangeHistory = (accountId: AccountId = "cdc") => api<any>("/api/change-history", undefined, accountId, 0);

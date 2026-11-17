@@ -10,6 +10,16 @@ Drizzle support.
 
 ## Quick Start
 
+### Small transfer ZIP (Windows)
+
+Run `npm run zip:transfer`. The compressed archive is saved in `outputs/`.
+It includes source code and project data, while skipping dependencies, generated
+builds, caches, old archives, local runtime storage (`data-store`), credentials
+(`.env*`, `.auth`, private keys), and Git history. This is a source transfer,
+not a full backup of local database/runtime state. Keep any required runtime
+data and environment settings separately. On the receiving computer, extract
+the ZIP, configure `.env`, and run `npm ci` before starting the app.
+
 ```bash
 npm install
 npm run dev

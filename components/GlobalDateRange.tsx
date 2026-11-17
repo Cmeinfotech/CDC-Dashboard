@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Layers3, Search, X } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Layers3, Search, X } from "lucide-react";
 
 type DateRange = {
   startDate: string;
@@ -88,20 +88,15 @@ export function GlobalProductFilter({ products }: { products: ProductOption[] })
   const matches = products.filter((product) => `${product.name} ${product.parent} ${(product.children || []).map((child) => child.asin).join(" ")}`.toLowerCase().includes(query.trim().toLowerCase()));
   const toggle = (parent: string) => setSelectedProductParents(selectedProductParents.includes(parent) ? selectedProductParents.filter((value) => value !== parent) : [...selectedProductParents, parent]);
   const selectionLabel = selectedProductParents.length ? `${selectedProductParents.length} products selected` : "All products";
-  const selectedProducts = selectedProductParents.map((parent) => products.find((product) => product.parent === parent) || { parent, name: parent });
   return <div className="global-product-filter" ref={root}>
     <button className="global-product-trigger" type="button" aria-expanded={open} aria-haspopup="listbox" onClick={() => setOpen((value) => !value)}>
       <Layers3 size={16} aria-hidden="true" /><span><b>Products</b><small>{selectionLabel} · {products.length} available</small></span><ChevronDown size={15} />
     </button>
-    {selectedProducts.length > 0 && <div className="global-product-selected" aria-label="Selected products">
-      {selectedProducts.slice(0, 2).map((product) => <span className="global-product-chip" key={product.parent} title={`${product.name} · ${product.parent}`}><b>{product.name}</b><small>{product.parent}</small></span>)}
-      {selectedProducts.length > 2 && <span className="global-product-chip-more" title={selectedProducts.slice(2).map((product) => `${product.name} · ${product.parent}`).join("\n")}>+{selectedProducts.length - 2} more</span>}
-    </div>}
     {open && <div className="global-product-menu">
       <div className="global-product-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search product or ASIN…" aria-label="Search products" /><kbd>{matches.length}</kbd></div>
       <div className="global-product-list" role="listbox" aria-multiselectable="true">
-        <button type="button" role="option" aria-selected={!selectedProductParents.length} className={!selectedProductParents.length ? "selected" : ""} onClick={() => setSelectedProductParents([])}><span className="global-product-icon"><Layers3 size={15} /></span><span><b>All products</b><small>Use the full dashboard portfolio</small></span>{!selectedProductParents.length && <Check size={15} />}</button>
-        {matches.map((product, index) => <button type="button" role="option" aria-selected={selectedProductParents.includes(product.parent)} className={selectedProductParents.includes(product.parent) ? "selected" : ""} key={product.parent} onClick={() => toggle(product.parent)}><span className={`global-product-icon tone-${index % 4}`}><Boxes size={15} /></span><span><b>{product.name}</b><small>{product.parent} · {product.children?.length || 0} child ASINs</small></span>{selectedProductParents.includes(product.parent) && <Check size={15} />}</button>)}
+        <button type="button" role="option" aria-selected={!selectedProductParents.length} className={!selectedProductParents.length ? "selected" : ""} onClick={() => setSelectedProductParents([])}><span className="global-product-icon"><Layers3 size={15} /></span><span><b>All products</b><small>Use the full dashboard portfolio</small></span><span className={`global-product-checkbox ${!selectedProductParents.length ? "checked" : ""}`} aria-hidden="true">{!selectedProductParents.length && <Check size={12} />}</span></button>
+        {matches.map(product => { const checked = selectedProductParents.includes(product.parent); return <button type="button" role="option" aria-selected={checked} className={checked ? "selected" : ""} key={product.parent} onClick={() => toggle(product.parent)}><span><b>{product.name}</b><small>{product.parent} · {product.children?.length || 0} child ASINs</small></span><span className={`global-product-checkbox ${checked ? "checked" : ""}`} aria-hidden="true">{checked && <Check size={12} />}</span></button>; })}
         {!matches.length && <p className="global-product-empty">No products match that search.</p>}
       </div>
     </div>}
@@ -177,6 +172,8 @@ export function GlobalDateRangeFilter({ products, defaultRange, showProducts = t
     else if (preset === "This month") from = new Date(end.getFullYear(), end.getMonth(), 1);
     else if (preset === "Last month") { from = new Date(end.getFullYear(), end.getMonth() - 1, 1); end.setTime(new Date(end.getFullYear(), end.getMonth(), 0).getTime()); }
     else if (preset === "This year — until today") from = new Date(end.getFullYear(), 0, 1);
+    else if (preset === "Last 2 years") from = new Date(end.getFullYear() - 2, end.getMonth(), end.getDate());
+    else if (preset === "Last 1 year") from = new Date(end.getFullYear() - 1, end.getMonth(), end.getDate());
     else if (monthDate) { from = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1); end.setTime(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getTime()); }
     else if (preset === "Total period") { clearDateRange(); setCalendarMonth(today); setPickerMode(null); return; }
     else if (preset !== "Today") return;
@@ -199,7 +196,7 @@ export function GlobalDateRangeFilter({ products, defaultRange, showProducts = t
     <section className="global-date-filter" aria-label="Dashboard date range">
       <div className="global-date-title">
         <CalendarDays size={17} aria-hidden="true" />
-        <span><b>Dashboard date range</b><small>{applied ? "Custom period" : hasDefault ? "Default period" : "Default · All available dates"}</small><strong className="global-date-period">{periodLabel}</strong></span>
+        <span><b>Dashboard date range</b><strong className="global-date-period">{periodLabel}</strong></span>
       </div>
       {showProducts && <GlobalProductFilter products={products ?? remoteProducts} />}
       <div className="global-date-picker" ref={pickerRef}>
@@ -219,6 +216,8 @@ export function GlobalDateRangeFilter({ products, defaultRange, showProducts = t
             <button type="button" onClick={() => selectPreset("This month")}>This month</button>
             <button type="button" onClick={() => selectPreset("Last month")}>Last month</button>
             <button type="button" onClick={() => selectPreset("This year — until today")}>This year — until today</button>
+            <button type="button" onClick={() => selectPreset("Last 2 years")}>Last 2 years</button>
+            <button type="button" onClick={() => selectPreset("Last 1 year")}>Last 1 year</button>
             <div className="global-date-months">{months.map((month) => <button type="button" key={dateKey(month)} onClick={() => selectPreset(monthLabel(month), month)}>{monthLabel(month)}</button>)}</div>
           </div>
         </div>}

@@ -43,3 +43,7 @@ yarn-error.log*
 /data-store/
 /.npm-cache/
 /.auth/
+
+# Private source spreadsheets and generated TypeScript cache
+/data/
+*.tsbuildinfo

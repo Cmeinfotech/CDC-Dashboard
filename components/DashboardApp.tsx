@@ -58,11 +58,10 @@ import {
 } from "lucide-react";
 import {
   getDashboardData,
+  getAmazonOrderRecords,
   getTrackingData,
   getAmazonStatus,
   getAmazonTrackingCatalog,
-  getAmazonMonitorData,
-  getAmazonProductCatalog,
   getChangeHistory,
   invalidateDashboardCache,
   mergeAllAsinChanges,
@@ -76,6 +75,7 @@ import DashboardNotifications, { useDashboardNotifications } from "./DashboardNo
 import AdminUsers from "./AdminUsers";
 import ProductThumbnail from "./ProductThumbnail";
 import DashboardLogoutButton from "./DashboardLogoutButton";
+import KpiCard from "./KpiCard";
 import { GlobalDateRangeFilter, getAvailableDateRange, useGlobalDateRange } from "./GlobalDateRange";
 import type { Product } from "../mocks/dashboardData";
 
@@ -94,33 +94,20 @@ const money = (value: number) =>
     currency: "USD",
     maximumFractionDigits: 0,
   }).format(value);
-const elapsedSince = (timestamp: string, now: number) => {
-  const minutes = Math.floor(Math.abs(now - new Date(timestamp).getTime()) / 60_000);
-  if (!Number.isFinite(minutes)) return "";
-  if (minutes < 1) return "just now";
-  const value = minutes < 1 ? "just now" : minutes < 60 ? `${minutes} min${minutes === 1 ? "" : "s"}` : minutes < 1440 ? `${Math.floor(minutes / 60)} hr${Math.floor(minutes / 60) === 1 ? "" : "s"}` : `${Math.floor(minutes / 1440)} day${Math.floor(minutes / 1440) === 1 ? "" : "s"}`;
-  return now >= new Date(timestamp).getTime() ? `${value} ago` : `in ${value}`;
-};
-
 const NAV = [
   { id: "analytics" as Page, label: "Sales Analytics", icon: BarChart3 },
-  { id: "users" as Page, label: "User Management", icon: Users },
-  { id: "productPerformance" as Page, label: "Product Performance", icon: Activity },
-  { id: "productCatalog" as Page, label: "Product Catalogue", icon: Boxes },
-  { id: "allSales" as Page, label: "All Product Sales", icon: Layers3 },
   { id: "orders" as Page, label: "Orders", icon: Receipt },
-  {
-    id: "tracking" as Page,
-    label: "Product / ASIN Tracking",
-    icon: PackageSearch,
-  },
-  {
-    id: "attributes" as Page,
-    label: "Attribute Changes",
-    icon: FileCheck2,
-  },
   { id: "accountHealth" as Page, label: "Amazon Account Health", icon: ShieldCheck },
   { id: "changeHistory" as Page, label: "Change History", icon: History },
+  { id: "users" as Page, label: "User Management", icon: Users },
+];
+
+const PRODUCT_NAV = [
+  { id: "productPerformance" as Page, label: "Product Performance", icon: Activity },
+  { id: "allSales" as Page, label: "All Product Sales", icon: Layers3 },
+  { id: "productCatalog" as Page, label: "Product Catalogue", icon: Boxes },
+  { id: "tracking" as Page, label: "ASIN Tracking", icon: PackageSearch },
+  { id: "attributes" as Page, label: "Attribute Changes", icon: FileCheck2 },
 ];
 
 const ACCOUNTS: Record<AccountId, { name: string; shortName: string; description: string; initials: string }> = {
@@ -185,12 +172,13 @@ function Toasts({ toasts }: { toasts: Toast[] }) {
   );
 }
 
-function AppTooltip({ text }: { text: string }) {
-  return (
-    <span className="tip" aria-label={text}>
-      ?<span>{text}</span>
-    </span>
-  );
+function AmazonSyncIndicator({ lastRefresh }: { lastRefresh: string | null }) {
+  return <span className="topbar-live-status" title={lastRefresh ? `Last completed Amazon data pull: ${new Date(lastRefresh).toLocaleString()}. Reloading this page does not start a new Amazon pull.` : "No completed Amazon sync yet"}>
+    <Clock3 size={14} />
+    {lastRefresh
+      ? `Last Amazon pull · ${new Date(lastRefresh).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", hour12: true })}`
+      : "No completed Amazon pull yet"}
+  </span>;
 }
 
 function DashboardSkeleton() {
@@ -261,7 +249,7 @@ function ChangeHistoryView({ account }: { account: AccountId }) {
   </section>;
 }
 
-export default function DashboardApp() {
+export default function DashboardApp({ children }: { children?: React.ReactNode } = {}) {
   const notifications = useDashboardNotifications();
   const notificationCount = notifications.state?.notices.length ?? 0;
   const { selectedProductParents, setSelectedProductParents } = useGlobalDateRange();
@@ -271,12 +259,8 @@ export default function DashboardApp() {
   );
   const [account, setAccount] = useState<AccountId>("cdc");
   const [amazonLastRefresh, setAmazonLastRefresh] = useState<string | null>(null);
-  const [amazonSyncStatus, setAmazonSyncStatus] = useState<string | null>(null);
-  const [amazonStatusChecked, setAmazonStatusChecked] = useState(false);
-  const [amazonStatusError, setAmazonStatusError] = useState("");
-  const [amazonSyncInterval, setAmazonSyncInterval] = useState(30);
-  const [clockNow, setClockNow] = useState(() => Date.now());
   const [collapsed, setCollapsed] = useState(false);
+  const [productNavOpen, setProductNavOpen] = useState(true);
   const [mobileNav, setMobileNav] = useState(false);
   const [loading, setLoading] = useState(true);
   const [dashboardError, setDashboardError] = useState("");
@@ -285,10 +269,6 @@ export default function DashboardApp() {
   const [tracking, setTracking] = useState<any>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [canManageUsers, setCanManageUsers] = useState(false);
-  useEffect(() => {
-    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
   useEffect(() => {
     let active = true;
     fetch("/api/admin/users", { cache: "no-store" }).then(async response => response.ok ? response.json() : null).then(result => { if (active) setCanManageUsers(result?.canCreate === true || result?.canManage === true); }).catch(() => { if (active) setCanManageUsers(false); });
@@ -303,14 +283,6 @@ export default function DashboardApp() {
       const dashboard = await getDashboardData(accountId);
       setData(dashboard);
       setDashboardError(dashboard.databaseReady === false ? "Sales data is unavailable. Check the database connection or upload source sheets." : "");
-      if (accountId === "cdc") {
-        // Warm the heavier catalog and monitor screens after the main dashboard
-        // is visible so first navigation is ready without delaying startup.
-        window.setTimeout(() => {
-          void getAmazonProductCatalog().catch(() => {});
-          void getAmazonMonitorData().catch(() => {});
-        }, 1200);
-      }
     } catch (error) {
       setDashboardError(`${error instanceof Error ? error.message : "Sales data could not be loaded."} Missing data is not a zero sales result.`);
       setData({ products: [], monthlySales: [], dailySales: [], dailySalesRecords: [], metrics: {}, granularity: "monthly", salesRecords: [], catalogRecords: [], orderRecords: [], databaseReady: false });
@@ -322,7 +294,10 @@ export default function DashboardApp() {
   useEffect(() => {
     setLoading(true);
     setTracking(null);
-    const requestedPage = new URLSearchParams(window.location.search).get("page");
+    const requestedPage = window.location.pathname.startsWith('/amazon/account-health') ? 'accountHealth'
+      : window.location.pathname === '/amazon/product' ? 'productCatalog'
+      : window.location.pathname.startsWith('/amazon/') ? 'tracking'
+      : new URLSearchParams(window.location.search).get("page");
     const initialPage: Page = requestedPage === "notifications" ? "notifications" : requestedPage === "users" ? "users" : account === "cdc" ? requestedPage === "accountHealth" ? "accountHealth" : requestedPage === "attributes" ? "attributes" : requestedPage === "allSales" ? "allSales" : requestedPage === "orders" ? "orders" : requestedPage === "tracking" ? "tracking" : requestedPage === "productPerformance" ? "productPerformance" : requestedPage === "productCatalog" ? "productCatalog" : "analytics" : "analytics";
     setVisitedPages(new Set<Page>([initialPage]));
     setPage(initialPage);
@@ -349,12 +324,8 @@ export default function DashboardApp() {
         if (!response.ok) throw new Error("Pull status could not be loaded.");
         const state = await response.json();
         if (!active) return;
-        setAmazonStatusChecked(true);
-        setAmazonStatusError(state.statusWarning || "");
-        if (Number.isInteger(state.intervalMinutes) && state.intervalMinutes >= 5) setAmazonSyncInterval(state.intervalMinutes);
         const completedAt = state.completedAt || null;
-        setAmazonSyncStatus(state.syncStatus || null);
-        if (completedAt) { setAmazonLastRefresh(completedAt); setClockNow(Date.now()); }
+        if (completedAt) setAmazonLastRefresh(completedAt);
         const updateAt = state.lastFinishedAt || completedAt;
         const catalogChanged = state.capturedAt && state.capturedAt !== lastCatalogAt;
         if (initialized && (catalogChanged || (["complete", "partial"].includes(state.syncStatus) && updateAt && updateAt !== lastCompletedAt))) {
@@ -365,13 +336,13 @@ export default function DashboardApp() {
         lastCatalogAt = state.capturedAt || null;
         initialized = true;
       } catch {
-        if (active) { setAmazonStatusChecked(true); setAmazonStatusError("Pull status unavailable; retrying automatically."); }
+        // Keep showing the last known completed pull time while retrying.
       } finally {
         inFlight = false;
       }
     };
     void pollForAmazonPull();
-    const timer = window.setInterval(() => void pollForAmazonPull(), 15_000);
+    const timer = window.setInterval(() => void pollForAmazonPull(), 60_000);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -408,10 +379,10 @@ export default function DashboardApp() {
     };
   }, [account, globalQuery, loading, needsTracking, tracking]);
   const openPage = useCallback((nextPage: Page) => {
-    // Start page-specific requests as soon as navigation is likely. Hover/focus
-    // handlers below usually finish these before the click is released.
-    if (account === "cdc" && (nextPage === "productCatalog" || nextPage === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
-    if (account === "cdc" && (nextPage === "tracking" || nextPage === "attributes")) void getAmazonMonitorData().catch(() => {});
+    if (children) {
+      window.location.href = `/?page=${encodeURIComponent(nextPage)}`;
+      return;
+    }
     setVisitedPages((current) => {
       if (current.has(nextPage)) return current;
       const next = new Set(current);
@@ -420,7 +391,7 @@ export default function DashboardApp() {
     });
     setPage(nextPage);
     setMobileNav(false);
-  }, [account]);
+  }, [children]);
   useEffect(() => {
     const handlePageRequest = (event: Event) => {
       const requested = (event as CustomEvent).detail;
@@ -449,12 +420,9 @@ export default function DashboardApp() {
   const titles = {
     notifications: ["Notifications", "Product, price, stock, and account-health alerts in one place."],
     users: ["User Management", "Create dashboard users and assign their access."],
-    accountHealth: ["Amazon Account Health", "View account rating, performance metrics and policy violations. Export the saved report to Excel."],
+    accountHealth: ["Amazon Account Health", ""],
     changeHistory: ["Change History", "See who made each recorded change and what changed."],
-    analytics: [
-      "Sales Analytics",
-      "Monitor revenue, product velocity, and catalog performance.",
-    ],
+    analytics: ["Sales Analytics", ""],
     productPerformance: ["Product Performance", "Compare sales, orders, units, and growth for each parent product."],
     productCatalog: ["Product Catalogue", "Browse parent and child ASIN relationships and listing details."],
     tracking: [
@@ -571,40 +539,72 @@ export default function DashboardApp() {
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell persistent-dashboard-shell">
       <aside
         id="dashboard-sidebar"
         className={`sidebar ${collapsed ? "collapsed" : ""} ${mobileNav ? "mobile-open" : ""}`}
       >
         <div className="side-top">
-          <Logo collapsed={collapsed} account={account} />
           <button
-            className="icon-btn collapse"
-            onClick={() => setCollapsed(!collapsed)}
-            aria-label="Toggle sidebar"
+            type="button"
+            className="sidebar-brand-toggle"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            aria-controls="dashboard-sidebar"
+            onClick={() => {
+              if (window.matchMedia('(max-width: 820px)').matches) setMobileNav(false);
+              else setCollapsed(current => !current);
+            }}
           >
-            {collapsed ? (
-              <PanelLeftOpen size={18} />
-            ) : (
-              <PanelLeftClose size={18} />
-            )}
+            <Logo collapsed={collapsed} account={account} />
           </button>
         </div>
         <nav>
-          {NAV.filter(item => (account === "cdc" || item.id !== "accountHealth") && (item.id !== "users" || canManageUsers)).map((item) => (
+          <button
+            type="button"
+            className={page === "analytics" ? "active" : ""}
+            aria-label="Sales Analytics"
+            title={collapsed ? "Sales Analytics" : undefined}
+            onClick={() => openPage("analytics")}
+          >
+            <BarChart3 size={19} />
+            {!collapsed && <span>Sales Analytics</span>}
+          </button>
+          <div className="product-nav-group">
+            <button
+              type="button"
+              className={`product-nav-toggle ${PRODUCT_NAV.some(item => page === item.id) ? "active" : ""}`}
+              aria-label="Product"
+              aria-expanded={productNavOpen}
+              title={collapsed ? "Product" : undefined}
+              onClick={() => setProductNavOpen(open => !open)}
+            >
+              <PackageSearch size={19} />
+              {!collapsed && <><span>Product</span><ChevronDown className={`product-nav-chevron ${productNavOpen ? "open" : ""}`} size={16} /></>}
+            </button>
+            {productNavOpen && <div className="product-nav-children" aria-label="Product pages">
+              {PRODUCT_NAV.map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`product-nav-child ${page === item.id ? "active" : ""}`}
+                  aria-label={item.label}
+                  title={collapsed ? item.label : undefined}
+                  onClick={() => openPage(item.id)}
+                >
+                  <item.icon size={19} />
+                  {!collapsed && <span>{item.label}</span>}
+                </button>
+              ))}
+            </div>}
+          </div>
+          {NAV.filter(item => item.id !== "analytics" && (account === "cdc" || item.id !== "accountHealth") && (item.id !== "users" || canManageUsers)).map((item) => (
             <button
               key={item.id}
               className={page === item.id ? "active" : ""}
               aria-label={item.label}
               title={collapsed ? item.label : undefined}
-              onMouseEnter={() => {
-                if (account === "cdc" && (item.id === "productCatalog" || item.id === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
-                if (account === "cdc" && (item.id === "tracking" || item.id === "attributes")) void getAmazonMonitorData().catch(() => {});
-              }}
-              onFocus={() => {
-                if (account === "cdc" && (item.id === "productCatalog" || item.id === "productPerformance")) void getAmazonProductCatalog().catch(() => {});
-                if (account === "cdc" && (item.id === "tracking" || item.id === "attributes")) void getAmazonMonitorData().catch(() => {});
-              }}
               onClick={() => {
                 openPage(item.id);
               }}
@@ -620,6 +620,17 @@ export default function DashboardApp() {
       </aside>
       <main className={collapsed ? "wide" : ""}>
         <header className="topbar">
+          <button
+            type="button"
+            className="icon-btn sidebar-toggle"
+            onClick={() => setCollapsed(current => !current)}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            aria-expanded={!collapsed}
+            aria-controls="dashboard-sidebar"
+          >
+            {collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
+          </button>
           <button
             className="icon-btn mobile-menu"
             onClick={() => setMobileNav(!mobileNav)}
@@ -685,18 +696,7 @@ export default function DashboardApp() {
             )}
           </div>
           <nav className="topbar-nav" aria-label="Workspace actions">
-            <span
-              className="topbar-live-status"
-              title={amazonLastRefresh ? `Last completed Amazon data pull: ${new Date(amazonLastRefresh).toLocaleString()}. Reloading this page does not start a new Amazon pull.` : "No completed Amazon sync yet"}
-            >
-              <Clock3 size={14} />
-              {amazonLastRefresh
-                ? `Last Amazon pull · ${new Date(amazonLastRefresh).toLocaleString("en-US", { dateStyle: "short", timeStyle: "short", hour12: true })} · ${elapsedSince(amazonLastRefresh, clockNow)}`
-                : !amazonStatusChecked ? "Checking Amazon pull status…" : amazonStatusError ? "Amazon pull status unavailable" : "No completed Amazon pull yet"}
-              {amazonLastRefresh && amazonStatusError ? " · Status needs attention" : ""}
-              {` · Every ${amazonSyncInterval} min`}
-              {amazonSyncStatus === "running" ? " · Sync running" : amazonSyncStatus === "partial" ? " · Some pulls failed" : amazonSyncStatus === "failed" ? " · Sync failed" : amazonSyncStatus === "interrupted" ? " · Sync interrupted" : ""}
-            </span>
+            <AmazonSyncIndicator lastRefresh={amazonLastRefresh} />
             <button
               type="button"
               className={`topbar-notifications ${page === "notifications" ? "active" : ""}`}
@@ -710,15 +710,18 @@ export default function DashboardApp() {
             <DashboardLogoutButton />
           </nav>
         </header>
-        <div className="page-wrap">
+        <div className="dashboard-fixed-filters">
+          <GlobalDateRangeFilter products={data?.products || []} defaultRange={getAvailableDateRange(data)} />
+        </div>
+        <div className={`page-wrap${children ? ' dashboard-route-content' : ''}`}>
+          {children || <>
           <div className="breadcrumbs">
             Workspace <ChevronRight size={13} /> <span>{titles[page][0]}</span>
           </div>
-          <GlobalDateRangeFilter products={data?.products || []} defaultRange={getAvailableDateRange(data)} />
           <div className="page-heading">
             <div>
               <h1>{titles[page][0]}</h1>
-              <p>{account === "cdc" && page === "tracking" ? "Track ASIN replacements, missing listings and parent-child changes from Amazon." : account === "cdc" && page === "attributes" ? "Compare product details between completed Amazon pulls." : titles[page][1]}</p>
+              {page !== "analytics" && page !== "productPerformance" && page !== "allSales" && page !== "tracking" && <p>{account === "cdc" && page === "attributes" ? "Compare product details between completed Amazon pulls." : titles[page][1]}</p>}
             </div>
             {account === 'cdc' && ['tracking', 'attributes'].includes(page) && <div id="amazon-export-action" />}
             {account === 'cdc' && page === 'productCatalog' && <div id="product-catalog-actions" />}
@@ -751,7 +754,7 @@ export default function DashboardApp() {
               )}
               {visitedPages.has("orders") && (
                 <div hidden={page !== "orders"}>
-                  <MemoAllProductSalesPage key={`${account}-orders`} data={data} notify={notify} ordersOnly />
+                  <MemoAllProductSalesPage key={`${account}-orders`} data={data} notify={notify} ordersOnly accountId={account} />
                 </div>
               )}
               {tracking && visitedPages.has("tracking") && (
@@ -766,6 +769,7 @@ export default function DashboardApp() {
               )}
             </>
           )}
+          </>}
         </div>
       </main>
       {mobileNav && (
@@ -789,7 +793,7 @@ function AnalyticsPage({
   notify: (a: string, b: string) => void;
   performanceOnly?: boolean;
 }) {
-  const { startDate: globalStartDate, endDate: globalEndDate, selectedProductParents } = useGlobalDateRange();
+  const { startDate: globalStartDate, endDate: globalEndDate, selectedProductParents, applyDateRange } = useGlobalDateRange();
   const scope = selectedProductParents.length === 0 ? "All products" : selectedProductParents.length === 1 ? selectedProductParents[0] : `MULTI:${selectedProductParents.join(",")}`;
   // Short dashboard ranges need day-level chart buckets. Filtering monthly
   // totals by overlap makes Today/Yesterday/This week all display the whole
@@ -809,6 +813,7 @@ function AnalyticsPage({
   const [amazonImageByParent, setAmazonImageByParent] = useState<Record<string, string>>({});
   const [amazonTitleByParent, setAmazonTitleByParent] = useState<Record<string, string>>({});
   useEffect(() => {
+    if (!performanceOnly) return;
     let active = true;
     getAmazonTrackingCatalog().then((catalog) => {
       if (active) { setAttentionCatalog(catalog); setAttentionError(false); }
@@ -826,7 +831,7 @@ function AnalyticsPage({
       if (active) setAmazonTitleByParent(titles);
     }).catch(() => { if (active) { setAmazonImageByParent({}); setAttentionError(true); } });
     return () => { active = false; };
-  }, []);
+  }, [performanceOnly]);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"sales" | "growth">("sales");
   const [pageNo, setPageNo] = useState(1);
@@ -843,11 +848,14 @@ function AnalyticsPage({
     if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
     const numericMonth = text.match(/^(20\d{2})-(0[1-9]|1[0-2])$/);
     if (numericMonth) return `${numericMonth[1]}-${numericMonth[2]}-01`;
-    const namedMonth = text.match(/^([a-z]{3,9})\s+(20\d{2})$/i);
+    const namedMonth = text.match(/^([a-z]{3,9})\s+(\d{2}|20\d{2})$/i);
     const monthIndex = namedMonth
       ? ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(namedMonth[1].slice(0, 3).toLowerCase())
       : -1;
-    return monthIndex >= 0 ? `${namedMonth![2]}-${String(monthIndex + 1).padStart(2, "0")}-01` : "";
+    if (monthIndex < 0) return "";
+    const yearValue = Number(namedMonth![2]);
+    const year = namedMonth![2].length === 2 ? 2000 + yearValue : yearValue;
+    return `${year}-${String(monthIndex + 1).padStart(2, "0")}-01`;
   };
   const monthlySource = (data.monthlySales || []).map((row: any) => ({ ...row, date: monthDate(row.month) }));
   const datedSource = dailySource.length ? dailySource : monthlySource;
@@ -858,6 +866,22 @@ function AnalyticsPage({
   const startDate = globalRangeActive ? globalStartDate : importedStart;
   const endDate = globalRangeActive ? globalEndDate : importedEnd;
   const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const openOrdersForChartPoint = (index: number) => {
+    const point = source[index];
+    if (!point) return;
+    if (period === "Monthly") {
+      const monthStart = monthDate(point.month) || monthDate(point.date);
+      if (!monthStart) return;
+      const monthEndDate = new Date(`${monthStart}T00:00:00Z`);
+      monthEndDate.setUTCMonth(monthEndDate.getUTCMonth() + 1, 0);
+      applyDateRange(monthStart, monthEndDate.toISOString().slice(0, 10));
+    } else {
+      const day = Array.isArray(point.sourceDates) ? point.sourceDates[0] : point.date;
+      if (typeof day !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+      applyDateRange(day, day);
+    }
+    window.location.assign(`${window.location.pathname}?page=orders`);
+  };
   const formatRangeDate = (value: string) => value
     ? new Date(`${value}T00:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
     : "Choose date";
@@ -1025,19 +1049,12 @@ function AnalyticsPage({
       { sales: 0, orders: 0, units: 0 },
     );
   });
-  const metricSeries = (key: "sales" | "orders" | "units") =>
-    pointMetrics.map((metric) =>
-      metric[key],
-    );
   const performanceChartData = chartData.map((point: any, index: number) => ({
     ...point,
     sales: point.total,
     orders: pointMetrics[index]?.orders || 0,
     units: pointMetrics[index]?.units || 0,
   }));
-  const averageOrderValueSeries = pointMetrics.map((metric) =>
-    metric.orders ? metric.sales / metric.orders : 0,
-  );
   const averageOrderValue = filteredTotals.orders
     ? filteredTotals.sales / filteredTotals.orders
     : 0;
@@ -1143,42 +1160,17 @@ function AnalyticsPage({
     );
   return (
     <div className={`analytics-page${performanceOnly ? " performance-page-only" : ""}`}>
-      {performanceOnly && <ProductPerformanceSummary products={productRows} filter={performanceFilter} onFilter={value => { setPerformanceFilter(value === performanceFilter ? "all" : value); setQuery(""); setPageNo(1); }} catalogReady={Boolean(attentionCatalog)} catalogError={attentionError} lowOrderThreshold={lowOrderThreshold} dateRangeLabel={`${formatRangeDate(startDate)} – ${formatRangeDate(endDate)}`} growthBucketLabel={growthBucketLabel} />}
+      {performanceOnly && <ProductPerformanceSummary products={productRows} filter={performanceFilter} onFilter={value => { setPerformanceFilter(value === performanceFilter ? "all" : value); setQuery(""); setPageNo(1); }} catalogReady={Boolean(attentionCatalog)} catalogError={attentionError} growthBucketLabel={growthBucketLabel} />}
       <div className="kpi-grid">
-        <Kpi
-          label="Gross sales"
-          value={money(total)}
-          color="cyan"
-          icon={<CircleDollarSign />}
-          spark={chartData.map((row: any) => Number(row.total || 0))}
-        />
-        <Kpi
-          label="Orders"
-          value={filteredTotals.orders.toLocaleString("en-US")}
-          color="indigo"
-          icon={<FileCheck2 />}
-          spark={metricSeries("orders")}
-        />
-        <Kpi
-          label="Units sold"
-          value={filteredTotals.units.toLocaleString("en-US")}
-          color="emerald"
-          icon={<Boxes />}
-          spark={metricSeries("units")}
-        />
-        <Kpi
-          label="Average order value"
-          value={money(averageOrderValue)}
-          color="amber"
-          icon={<Receipt />}
-          spark={averageOrderValueSeries}
-        />
+        <KpiCard title="Gross sales" count={money(total)} />
+        <KpiCard title="Orders" count={filteredTotals.orders.toLocaleString("en-US")} />
+        <KpiCard title="Units sold" count={filteredTotals.units.toLocaleString("en-US")} />
+        <KpiCard title="Average order value" count={money(averageOrderValue)} />
       </div>
       <div className="analytics-grid sales-performance-grid">
         <section className="panel sales-chart">
           <PanelHead
             title="Performance"
-            subtitle={`Sales and orders over time · click any ${period === "Daily" ? "day" : "month"} for sales, orders, units and change details · ${formatRangeDate(customRange ? startDate : importedStart)} – ${formatRangeDate(customRange ? endDate : importedEnd)}`}
           />
           <div className="sales-chart-summary">
             <div><span><i className="sales-color-orange" />Gross sales</span><strong>{money(filteredTotals.sales)}</strong></div>
@@ -1201,7 +1193,7 @@ function AnalyticsPage({
                     onClick={(state: any) => {
                       if (state?.activeTooltipIndex == null) return;
                       const index = Number(state.activeTooltipIndex);
-                      if (Number.isInteger(index) && index >= 0 && index < performanceChartData.length) setSelectedChartIndex(index);
+                      if (Number.isInteger(index) && index >= 0 && index < performanceChartData.length) openOrdersForChartPoint(index);
                     }}
                   >
                     <CartesianGrid stroke="#e6edf5" vertical={false} />
@@ -1237,7 +1229,7 @@ function AnalyticsPage({
                       radius={[3, 3, 0, 0]}
                       maxBarSize={30}
                       cursor="pointer"
-                      onClick={(_point: any, index: number) => setSelectedChartIndex(index)}
+                      onClick={(_point: any, index: number) => openOrdersForChartPoint(index)}
                     >
                       {performanceChartData.map((point: any, index: number) => (
                         <Cell
@@ -1316,7 +1308,7 @@ function AnalyticsPage({
         <div className="table-toolbar">
           <PanelHead
             title={performanceOnly && performanceFilter !== "all" ? ({ attention: "Low-performing products", stock: "Products with stock risk", strong: "Products performing well" } as const)[performanceFilter] : "Product performance"}
-            subtitle={focusView ? `Selected range · ${formatRangeDate(startDate)} – ${formatRangeDate(endDate)} · Fewest orders first` : strongView ? `Selected range · ${formatRangeDate(startDate)} – ${formatRangeDate(endDate)} · Highest sales first` : "Parent-level sales and orders use the selected date range"}
+            subtitle=""
           />
           <div className="performance-table-actions">
             <div className="table-search">
@@ -1332,15 +1324,9 @@ function AnalyticsPage({
               />
             </div>
             <button className="secondary dashboard-export-button" onClick={exportCsv}>
-              <Download size={16} /> CSV
+              <Download size={16} /> Export
             </button>
           </div>
-        </div>
-        <div className="growth-explainer">
-          <strong>How Growth is calculated</strong>
-          <span>{strongView ? <>Performing well means positive sales and more than {lowOrderThreshold} orders in the selected range. Sales growth = (latest displayed period sales − previous displayed period sales) ÷ previous displayed period sales × 100. This range compares {growthBucketLabel}. A missing or zero previous-period baseline displays as “No baseline.” Listing status is separate, so an incomplete listing can still qualify.</> : <>
-            Sales growth = (latest displayed period sales − previous displayed period sales) ÷ previous displayed period sales × 100. This range compares {growthBucketLabel}. A missing or zero previous-period baseline displays as “No baseline.” Sales and order totals use the selected date range; monthly reports are included by month when the range overlaps part of a month.
-          </>}</span>
         </div>
         {rows.length ? (
           <>
@@ -1405,18 +1391,52 @@ function AllProductSalesPage({
   notify,
   tracking = {},
   ordersOnly = false,
+  accountId = "cdc",
 }: {
   data: any;
   notify: (a: string, b: string) => void;
   tracking?: any;
   ordersOnly?: boolean;
+  accountId?: AccountId;
 }) {
   const { startDate, endDate, selectedProductParents } = useGlobalDateRange();
   const globalRangeActive = Boolean(startDate && endDate && startDate <= endDate);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
-  const [bestSellerView, setBestSellerView] = useState(false);
-  const [ordersView, setOrdersView] = useState(ordersOnly);
+  const ordersView = ordersOnly;
+  const orderCoverage = data.orderCoverage || {};
+  const orderQueryStart = globalRangeActive ? startDate : orderCoverage.startDate || "";
+  const orderQueryEnd = globalRangeActive ? endDate : orderCoverage.endDate || "";
+  const [queriedOrderRecords, setQueriedOrderRecords] = useState<any[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState("");
+  const [ordersTruncated, setOrdersTruncated] = useState(false);
+  useEffect(() => {
+    if (!ordersView || !orderQueryStart || !orderQueryEnd || orderQueryStart > orderQueryEnd) {
+      setQueriedOrderRecords([]);
+      setOrdersLoading(false);
+      setOrdersError("");
+      setOrdersTruncated(false);
+      return;
+    }
+    let active = true;
+    setOrdersLoading(true);
+    setOrdersError("");
+    setOrdersTruncated(false);
+    getAmazonOrderRecords(orderQueryStart, orderQueryEnd, accountId)
+      .then(result => {
+        if (!active) return;
+        setQueriedOrderRecords(result.orderRecords || []);
+        setOrdersTruncated(Boolean(result.truncated));
+      })
+      .catch(error => {
+        if (!active) return;
+        setQueriedOrderRecords([]);
+        setOrdersError(error instanceof Error ? error.message : "Could not load orders.");
+      })
+      .finally(() => { if (active) setOrdersLoading(false); });
+    return () => { active = false; };
+  }, [ordersView, orderQueryStart, orderQueryEnd, accountId]);
   useEffect(() => { setPage(1); }, [startDate, endDate, selectedProductParents]);
   const [parentFilters, setParentFilters] = useState<string[]>([]);
   const [childFilters, setChildFilters] = useState<string[]>([]);
@@ -1450,7 +1470,9 @@ function AllProductSalesPage({
     if (isoDate) return isoDate[1];
     const monthIndex = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(value.slice(0, 3).toLowerCase());
     if (monthIndex >= 0) {
-      const year = Number(value.match(/\b(20\d{2})\b/)?.[1] || new Date().getFullYear());
+      const yearValue = value.match(/\b(\d{2}|20\d{2})\b/)?.[1];
+      const parsedYear = yearValue ? Number(yearValue) : new Date().getFullYear();
+      const year = yearValue?.length === 2 ? 2000 + parsedYear : parsedYear;
       return `${year}-${String(monthIndex + 1).padStart(2, "0")}-01`;
     }
     const parsed = new Date(value);
@@ -1461,7 +1483,7 @@ function AllProductSalesPage({
     const monthValue = String(row.month || "").trim();
     const monthStart = /^\d{4}-\d{2}$/.test(monthValue)
       ? `${monthValue}-01`
-      : /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+20\d{2}$/i.test(monthValue)
+      : /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:\d{2}|20\d{2})$/i.test(monthValue)
         ? recordDate({ month: monthValue })
         : "";
     if (monthStart && !/^\d{4}-\d{2}-\d{2}$/.test(exactDate)) {
@@ -1502,7 +1524,9 @@ function AllProductSalesPage({
     return `Loaded data covers ${format(dates[0])} to ${format(dates.at(-1)!)}.`;
   };
   const salesDataPeriod = formatAvailablePeriod(allRows, (row) => recordDate(row));
-  const orderDataPeriod = formatAvailablePeriod(data.orderRecords || [], (record) => recordDate({ orderDate: record.orderDate }));
+  const orderDataPeriod = orderCoverage.startDate && orderCoverage.endDate
+    ? formatAvailablePeriod([{ orderDate: orderCoverage.startDate }, { orderDate: orderCoverage.endDate }], (record) => recordDate({ orderDate: record.orderDate }))
+    : formatAvailablePeriod(data.orderRecords || [], (record) => recordDate({ orderDate: record.orderDate }));
   const parents = [...new Set(allRows.map((r: any) => r.parentAsin).filter(Boolean))].sort();
   // A child ASIN is valid only under its selected parent. Showing all children
   // here allowed an unrelated child to be selected and produced a false empty
@@ -1528,28 +1552,7 @@ function AllProductSalesPage({
     (childFilters.length === 0 || childFilters.includes(r.childAsin)) &&
     `${r.parentAsin} ${r.childAsin} ${r.title}`.toLowerCase().includes(query.toLowerCase()),
   );
-  const productPerformance = [...rows.reduce((totals: Map<string, any>, row: any) => {
-    const asin = String(row.childAsin || row.parentAsin || row.title || "Unknown product");
-    const current = totals.get(asin) || {
-      asin,
-      parentAsin: row.parentAsin,
-      childAsin: row.childAsin || (row.asin && row.asin !== row.parentAsin ? row.asin : ""),
-      title: row.title || asin,
-      image: row.image || "",
-      sales: 0,
-      orders: 0,
-      units: 0,
-    };
-    current.sales += Number(row.sales || 0);
-    current.orders += Number(row.orders || 0);
-    current.units += Number(row.units || 0);
-    totals.set(asin, current);
-    return totals;
-  }, new Map()).values()];
-  const topPerformance = [...productPerformance].sort((a, b) => b.sales - a.sales)[0];
-  const bestSeller = [...productPerformance].sort((a, b) => b.units - a.units)[0];
-  const totalOrders = rows.reduce((total: number, row: any) => total + Number(row.orders || 0), 0);
-  const orderRows = (data.orderRecords || []).map((record: any) => ({ ...record, ...productDetailsFor(record) })).filter((record: any) => {
+  const orderRows = (ordersView ? queriedOrderRecords : data.orderRecords || []).map((record: any) => ({ ...record, ...productDetailsFor(record) })).filter((record: any) => {
     const date = recordDate({ orderDate: record.orderDate });
     return (!globalRangeActive || Boolean(date && date >= startDate && date <= endDate)) &&
       (!selectedProductParents.length || selectedProductParents.includes(record.parentAsin));
@@ -1568,77 +1571,31 @@ function AllProductSalesPage({
   const toggleParent = (parent: string) => { setParentFilters(current => current.includes(parent) ? current.filter(value => value !== parent) : [...current, parent]); setPage(1); };
   const toggleChild = (child: string) => { setChildFilters(current => current.includes(child) ? current.filter(value => value !== child) : [...current, child]); setPage(1); };
   const pageSize = 15;
-  const displayRows = ordersView ? orderRows : bestSellerView ? [...productPerformance].sort((a, b) => b.sales - a.sales || b.units - a.units) : rows;
+  const displayRows = ordersView ? orderRows : rows;
   const pages = Math.max(1, Math.ceil(displayRows.length / pageSize));
   const shown = displayRows.slice((page - 1) * pageSize, page * pageSize);
+  const exportWorkbook = async () => {
+    const { exportAnalyticsWorkbook } = await import("../services/analyticsWorkbookExport");
+    let exportTracking = filteredTracking;
+    if (!ordersOnly) {
+      try {
+        const response = await fetch("/api/amazon/monitor", { cache: "no-store" });
+        if (response.ok) {
+          const monitor = await response.json();
+          exportTracking = { ...filteredTracking, amazonTrackingChanges: monitor.changes || [] };
+        }
+      } catch {
+        // Keep the uploaded catalog history if the Amazon monitor is unavailable.
+      }
+    }
+    exportAnalyticsWorkbook(filteredData, exportTracking);
+    notify(
+      "Excel report exported",
+      filtersActive ? `${rows.length.toLocaleString()} filtered Amazon sales records were exported.` : "All Amazon sales records were exported.",
+    );
+  };
   return (
     <>
-      <div className="all-sales-head">
-        <div>
-          <b>{ordersView ? `${orderRows.length.toLocaleString()} order rows` : bestSellerView ? `${productPerformance.length.toLocaleString()} best-selling products` : `${rows.length.toLocaleString()} ${hasDailyOrderData ? "daily sales records" : "sales records"}`}</b>
-          <span>{ordersView ? "Order details matching the selected date and products." : "Daily parent and child ASIN performance for the selected range."}</span>
-        </div>
-        <div>
-          <button
-            className="primary"
-            onClick={async () => {
-              // XLSX is large. Load it only when the user exports, rather than
-              // adding it to the dashboard bundle on every visit.
-              const { exportAnalyticsWorkbook } = await import("../services/analyticsWorkbookExport");
-              // Amazon ASIN tracking is stored separately from the uploaded
-              // catalog history. Include it when available so this export has
-              // the same merge, reversal and relationship history as Tracking.
-              let exportTracking = filteredTracking;
-              if (!ordersOnly) {
-                try {
-                  const response = await fetch("/api/amazon/monitor", { cache: "no-store" });
-                  if (response.ok) {
-                    const monitor = await response.json();
-                    exportTracking = { ...filteredTracking, amazonTrackingChanges: monitor.changes || [] };
-                  }
-                } catch {
-                  // The workbook still contains the uploaded catalog history if
-                  // the Amazon monitor is temporarily unavailable.
-                }
-              }
-              exportAnalyticsWorkbook(filteredData, exportTracking);
-              notify(
-                "Excel report exported",
-                filtersActive ? `${rows.length.toLocaleString()} filtered Amazon sales records were exported.` : "All Amazon sales records were exported.",
-              );
-            }}
-          >
-            <FileSpreadsheet /> Export
-          </button>
-        </div>
-      </div>
-      {!ordersOnly && <section className="sales-highlights" aria-label="Product sales highlights">
-        <button className="sales-highlight-card sales-highlight-top" type="button" onClick={() => {
-          setBestSellerView(false);
-          setOrdersView(false);
-          setParentFilters([]);
-          setChildFilters([]);
-          setQuery("");
-          setPage(1);
-          window.requestAnimationFrame(() => document.getElementById("all-product-sales-table")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-        }} aria-label="Show all product sales">
-          <span className="sales-highlight-icon"><CircleDollarSign size={17} /></span>
-          <div className="sales-highlight-copy"><small>Sales</small><strong>{money(topPerformance?.sales || 0)}</strong></div>
-        </button>
-        <button className={`sales-highlight-card sales-highlight-best${bestSellerView ? " is-active" : ""}`} type="button" onClick={() => {
-          if (!bestSeller) return;
-          setOrdersView(false);
-          setParentFilters([]);
-          setChildFilters([]);
-          setQuery("");
-          setPage(1);
-          setBestSellerView((active) => !active);
-          window.requestAnimationFrame(() => document.getElementById("all-product-sales-table")?.scrollIntoView({ behavior: "smooth", block: "start" }));
-        }} aria-label="Show best-selling products ranked by sales" disabled={!bestSeller}>
-          <span className="sales-highlight-icon"><Boxes size={17} /></span>
-          <div className="sales-highlight-copy"><small>Best Seller</small><strong>{(bestSeller?.units || 0).toLocaleString()} units</strong></div>
-        </button>
-      </section>}
       {!ordersView && <div className="all-sales-filters">
         <label className="parent-multi-filter">Parent ASIN<div className="parent-multi-picker" ref={parentPickerRef}><button type="button" className="parent-multi-trigger" onClick={()=>setParentPickerOpen(open=>{const next=!open;if(next)setParentAsinSearch("");return next})}><span>{parentFilters.length ? `${parentFilters.length} parent ASIN${parentFilters.length===1?"":"s"} selected` : "All parent ASINs"}</span><ChevronDown size={15}/></button>{parentPickerOpen&&<div className="parent-multi-menu"><div className="asin-picker-search"><Search size={14}/><input autoFocus value={parentAsinSearch} onChange={(event)=>setParentAsinSearch(event.target.value)} placeholder="Search parent ASIN" aria-label="Search parent ASIN" /></div><button type="button" className="parent-select-all" disabled={!parentPickerOptions.length} onClick={()=>{const allSelected=parentPickerOptions.every(parent=>parentFilters.includes(parent));setParentFilters(current=>allSelected?current.filter(parent=>!parentPickerOptions.includes(parent)):[...new Set([...current,...parentPickerOptions])]);setPage(1)}}>{parentPickerOptions.every(parent=>parentFilters.includes(parent))?"Clear visible":"Select visible"}</button><div>{parentPickerOptions.map(parent=><label key={parent}><input type="checkbox" checked={parentFilters.includes(parent)} onChange={()=>toggleParent(parent)}/><code>{parent}</code></label>)}{!parentPickerOptions.length&&<p className="asin-picker-empty">No parent ASIN found.</p>}</div></div>}</div></label>
         <label className="parent-multi-filter">Child ASIN<div className="parent-multi-picker" ref={childPickerRef}><button type="button" className="parent-multi-trigger" onClick={()=>setChildPickerOpen(open=>{const next=!open;if(next)setChildAsinSearch("");return next})}><span>{childFilters.length ? `${childFilters.length} child ASIN${childFilters.length===1?"":"s"} selected` : "All child ASINs"}</span><ChevronDown size={15}/></button>{childPickerOpen&&<div className="parent-multi-menu"><div className="asin-picker-search"><Search size={14}/><input autoFocus value={childAsinSearch} onChange={(event)=>setChildAsinSearch(event.target.value)} placeholder="Search child ASIN" aria-label="Search child ASIN" /></div><button type="button" className="parent-select-all" disabled={!childPickerOptions.length} onClick={()=>{const allSelected=childPickerOptions.every(child=>childFilters.includes(child));setChildFilters(current=>allSelected?current.filter(child=>!childPickerOptions.includes(child)):[...new Set([...current,...childPickerOptions])]);setPage(1)}}>{childPickerOptions.every(child=>childFilters.includes(child))?"Clear visible":"Select visible"}</button><div>{childPickerOptions.map(child=><label key={child}><input type="checkbox" checked={childFilters.includes(child)} onChange={()=>toggleChild(child)}/><code>{child}</code></label>)}{!childPickerOptions.length&&<p className="asin-picker-empty">No child ASIN found.</p>}</div></div>}</div></label>
@@ -1647,34 +1604,43 @@ function AllProductSalesPage({
       <section className="panel table-panel all-sales-table" id="all-product-sales-table">
         <div className="table-toolbar">
           <PanelHead
-            title={ordersView ? "Order details" : bestSellerView ? "Best-selling products" : hasDailyOrderData ? "Daily product sales" : "All product sales"}
-            subtitle={ordersView ? "Date, order ID, status, ASIN, SKU, product, quantity and item price" : bestSellerView ? "Products ranked by sales for the selected date and product filters" : hasDailyOrderData ? "Daily sales by product for the selected date and product filters" : "Amazon sales records grouped by reporting period"}
+            title={ordersView ? "Order details" : hasDailyOrderData ? "Daily product sales" : "All product sales"}
+            subtitle={ordersView ? `Date, order ID, status, ASIN, SKU, product, quantity and item price${ordersTruncated ? " · More than 10,000 rows match; narrow the date range to see all orders." : ""}` : undefined}
           />
-          <div className="table-search">
-            <Search size={15} />
-            <input
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setPage(1);
-              }}
-              placeholder={ordersView ? "Search order ID, ASIN, SKU or product…" : "Search parent, child ASIN or product…"}
-            />
+          <div className="all-sales-table-actions">
+            <div className="table-search">
+              <Search size={15} />
+              <input
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setPage(1);
+                }}
+                placeholder={ordersView ? "Search order ID, ASIN, SKU or product…" : "Search parent, child ASIN or product…"}
+              />
+            </div>
+            <button className="secondary dashboard-export-button" onClick={exportWorkbook}>
+              <FileSpreadsheet /> Export
+            </button>
           </div>
         </div>
-        {displayRows.length ? (
+        {ordersView && ordersLoading ? (
+          <EmptyState title="Loading order details…" body="Loading Amazon order rows for the selected date range." />
+        ) : ordersView && ordersError ? (
+          <EmptyState title="Orders could not be loaded" body={ordersError} />
+        ) : displayRows.length ? (
           <>
             <div className="table-scroll">
               <table className={ordersView ? "orders-data-grid" : "product-sales-grid"}>
                 <thead>
                   <tr>
-                    {ordersView ? <><th>Order date</th><th>Order ID</th><th>Status</th><th>Parent ASIN</th><th>Child ASIN</th><th>SKU</th><th>Product</th><th>Quantity</th><th>Item price</th></> : <><th>{bestSellerView ? "Rank" : hasDailyOrderData ? "Date" : "Month"}</th><th>Parent ASIN</th><th>Child ASIN</th><th>Product</th><th>Sales</th><th>Orders</th><th>Units</th></>}
+                    {ordersView ? <><th>Order date</th><th>Order ID</th><th>Status</th><th>Parent ASIN</th><th>Child ASIN</th><th>SKU</th><th>Product</th><th>Quantity</th><th>Item price</th></> : <><th>{hasDailyOrderData ? "Date" : "Month"}</th><th>Parent ASIN</th><th>Child ASIN</th><th>Product</th><th>Units</th><th>Orders</th><th>Sales</th></>}
                   </tr>
                 </thead>
                 <tbody>
                   {shown.map((r: any, i: number) => (
-                    <tr key={ordersView ? `${r.orderId || r.amazonOrderId || r["amazon-order-id"]}-${r.childAsin || r.asin}-${i}` : bestSellerView ? `best-${r.asin}` : `${r.parentAsin}-${r.childAsin}-${r.month}-${i}`}>
-                      {ordersView ? <><td data-label="Order date">{r.orderDate || "—"}</td><td data-label="Order ID"><code>{r.orderId || r.amazonOrderId || r["amazon-order-id"] || "—"}</code></td><td data-label="Status">{r.status || r.orderStatus || r.itemStatus || r["order-status"] || "—"}</td><td data-label="Parent ASIN"><code>{r.parentAsin || "—"}</code></td><td data-label="Child ASIN"><code>{r.childAsin || r.asin || "—"}</code></td><td data-label="SKU"><code>{r.sku || "—"}</code></td><td data-label="Product"><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title} size={34}/><strong>{r.title}</strong></div></td><td data-label="Quantity">{Number(r.quantity || r.units || 0).toLocaleString()}</td><td data-label="Item price">{money(Number(r.itemPrice || r.sales || 0))}</td></> : <><td>{bestSellerView ? (page - 1) * pageSize + i + 1 : r.date || r.month || "—"}</td><td><code>{r.parentAsin}</code></td><td><code>{r.childAsin}</code></td><td><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title || r.childAsin} size={34}/><strong>{r.title || r.childAsin || "—"}</strong></div></td><td>{money(Number(r.sales || 0))}</td><td>{Number(r.orders || 0).toLocaleString()}</td><td>{Number(r.units || 0).toLocaleString()}</td></>}
+                    <tr key={ordersView ? `${r.orderId || r.amazonOrderId || r["amazon-order-id"]}-${r.childAsin || r.asin}-${i}` : `${r.parentAsin}-${r.childAsin}-${r.month}-${i}`}>
+                      {ordersView ? <><td data-label="Order date">{r.orderDate || "—"}</td><td data-label="Order ID"><code>{r.orderId || r.amazonOrderId || r["amazon-order-id"] || "—"}</code></td><td data-label="Status">{r.status || r.orderStatus || r.itemStatus || r["order-status"] || "—"}</td><td data-label="Parent ASIN"><code>{r.parentAsin || "—"}</code></td><td data-label="Child ASIN"><code>{r.childAsin || r.asin || "—"}</code></td><td data-label="SKU"><code>{r.sku || "—"}</code></td><td data-label="Product"><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title} size={34}/><strong>{r.title}</strong></div></td><td data-label="Quantity">{Number(r.quantity || r.units || 0).toLocaleString()}</td><td data-label="Item price">{money(Number(r.itemPrice || r.sales || 0))}</td></> : <><td>{r.date || r.month || "—"}</td><td><code>{r.parentAsin}</code></td><td><code>{r.childAsin}</code></td><td><div className="sales-product-cell"><ProductThumbnail src={r.image} title={r.title || r.childAsin} size={34}/><strong>{r.title || r.childAsin || "—"}</strong></div></td><td>{Number(r.units || 0).toLocaleString()}</td><td>{Number(r.orders || 0).toLocaleString()}</td><td>{money(Number(r.sales || 0))}</td></>}
                     </tr>
                   ))}
                 </tbody>
@@ -1686,13 +1652,13 @@ function AllProductSalesPage({
               total={displayRows.length}
               pageSize={pageSize}
               onChange={setPage}
-              label={bestSellerView ? "products" : "sales records"}
+              label={ordersView ? "order rows" : "sales records"}
             />
           </>
         ) : (
           <EmptyState
-            title={ordersView ? "No order details available" : bestSellerView ? "No best-selling products available" : "No product sales available"}
-            body={ordersView ? `${orderDataPeriod} No order details match the selected date and products.` : globalRangeActive ? `${salesDataPeriod} No daily order sales match the selected date and products.` : `${salesDataPeriod} Daily order sales will appear after a successful Amazon sync.`}
+            title={ordersView ? "No order details available" : "No product sales available"}
+            body={ordersView ? `${orderDataPeriod} No order details match the selected date and products.${ordersTruncated ? " Narrow the date range to show all matching orders." : ""}` : globalRangeActive ? `${salesDataPeriod} No daily order sales match the selected date and products.` : `${salesDataPeriod} Daily order sales will appear after a successful Amazon sync.`}
           />
         )}
       </section>
@@ -2021,34 +1987,10 @@ function ProductDetailsPage({
         {!hasDailyData && <small>Daily and weekly views need order records with actual dates.</small>}
       </div>
       <div className="kpi-grid product-detail-kpis">
-        <Kpi
-          label="Gross sales"
-          value={money(sales)}
-          color="cyan"
-          icon={<CircleDollarSign />}
-          spark={monthlyRows.map((row) => Number(row.sales || 0))}
-        />
-        <Kpi
-          label="Orders"
-          value={orders.toLocaleString()}
-          color="indigo"
-          icon={<FileCheck2 />}
-          spark={monthlyRows.map((row) => Number(row.orders || 0))}
-        />
-        <Kpi
-          label="Units sold"
-          value={units.toLocaleString()}
-          color="emerald"
-          icon={<Boxes />}
-          spark={monthlyRows.map((row) => Number(row.units || 0))}
-        />
-        <Kpi
-          label="Child ASINs"
-          value={product.children.length.toString()}
-          color="amber"
-          icon={<Layers3 />}
-          spark={monthlyRows.map(() => product.children.length)}
-        />
+        <KpiCard title="Gross sales" count={money(sales)} />
+        <KpiCard title="Orders" count={orders.toLocaleString()} />
+        <KpiCard title="Units sold" count={units.toLocaleString()} />
+        <KpiCard title="Child ASINs" count={product.children.length.toString()} />
       </div>
       <ProductReviewCards key={product.parent} asin={product.parent} />
       <section className="panel product-detail-chart">
@@ -2373,47 +2315,6 @@ function MonthlySalesTable({
     </section>
   );
 }
-function Kpi({
-  label,
-  value,
-  color,
-  icon,
-  spark,
-}: {
-  label: string;
-  value: string;
-  color: string;
-  icon: any;
-  spark: number[];
-}) {
-  const d = spark.map((v, i) => ({ i, v }));
-  return (
-    <div className={`kpi ${color}`}>
-      <div className="kpi-top">
-        <div className="kpi-icon">{icon}</div>
-        <AppTooltip text={`How ${label.toLowerCase()} is calculated`} />
-      </div>
-      <span>{label}</span>
-      <div className="kpi-value">
-        <b>{value}</b>
-      </div>
-      <div className="spark">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={d}>
-            <Area
-              type="monotone"
-              dataKey="v"
-              stroke="currentColor"
-              fill="currentColor"
-              fillOpacity={0.08}
-              strokeWidth={2}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
 function PanelHead({
   title,
   subtitle,
@@ -2427,7 +2328,7 @@ function PanelHead({
     <div className="panel-head">
       <div>
         <h3>{title}</h3>
-        <p>{subtitle}</p>
+        {subtitle && <p>{subtitle}</p>}
       </div>
       {actions && <div className="panel-actions">{actions}</div>}
     </div>

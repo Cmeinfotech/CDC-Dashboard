@@ -4,7 +4,7 @@ import { parseEnv } from 'node:util';
 import { spawn } from 'node:child_process';
 import { runPullJobs } from '../services/amazonSyncRunner.mjs';
 import { assertAmazonStorage } from '../services/amazonDataSecurity.mjs';
-import { acquireLock, atomicJson, monitorRoot } from '../services/amazonMonitorStore.mjs';
+import { acquireLock, atomicJson, monitorRoot, readJson } from '../services/amazonMonitorStore.mjs';
 
 const envFile = await fs.readFile('.env', 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
 const env = { ...parseEnv(envFile), ...process.env };
@@ -30,6 +30,57 @@ const scheduleEpoch = Date.now() - process.uptime() * 1000;
 function nextRunAt(now = Date.now()) {
   const intervalMs = intervalMinutes * 60_000;
   return new Date(scheduleEpoch + (Math.max(0, Math.floor((now - scheduleEpoch) / intervalMs)) + 1) * intervalMs).toISOString();
+}
+
+function endOfTodayInTimeZone(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const nextDayUtc = Date.UTC(Number(values.year), Number(values.month) - 1, Number(values.day) + 1);
+  const offset = new Intl.DateTimeFormat('en-US', { timeZone, timeZoneName: 'longOffset' }).formatToParts(now).find(part => part.type === 'timeZoneName')?.value || 'GMT+00:00';
+  const match = offset.match(/GMT([+-])(\d{2}):(\d{2})/);
+  const offsetMinutes = match ? (match[1] === '-' ? -1 : 1) * (Number(match[2]) * 60 + Number(match[3])) : 0;
+  return new Date(nextDayUtc - offsetMinutes * 60_000 - 1).toISOString();
+}
+
+async function pauseAutomation(untilToday = false) {
+  assertAmazonStorage();
+  const current = await readJson(automationFile, {}) || {};
+  const pausedAt = new Date().toISOString();
+  const pauseUntil = untilToday ? endOfTodayInTimeZone() : null;
+  await atomicJson(automationFile, {
+    ...current,
+    enabled: false,
+    status: 'paused',
+    pauseReason: untilToday ? 'Paused for today by dashboard operator.' : 'Paused until manually resumed by dashboard operator.',
+    pausedAt,
+    pauseUntil,
+    nextRunAt: null,
+  });
+  console.log(JSON.stringify({ status: 'paused', pauseUntil }));
+}
+
+if (process.argv.includes('--pause')) {
+  await pauseAutomation();
+  process.exit(0);
+}
+
+if (process.argv.includes('--pause-for-today')) {
+  await pauseAutomation(true);
+  process.exit(0);
+}
+
+const existingAutomation = await readJson(automationFile, {}) || {};
+if (process.argv.includes('--resume')) {
+  assertAmazonStorage();
+  const resumed = { ...existingAutomation, enabled: true, status: 'scheduled', pauseUntil: null, pauseReason: null, resumedAt: new Date().toISOString(), nextRunAt: nextRunAt() };
+  await atomicJson(automationFile, resumed);
+  console.log(JSON.stringify({ status: 'scheduled', nextRunAt: resumed.nextRunAt }));
+  process.exit(0);
+}
+
+if (existingAutomation.status === 'paused' && (!existingAutomation.pauseUntil || Date.parse(existingAutomation.pauseUntil) > Date.now())) {
+  console.log(JSON.stringify({ status: 'paused', pauseUntil: existingAutomation.pauseUntil }));
+  process.exit(0);
 }
 
 let statusWrites = Promise.resolve();

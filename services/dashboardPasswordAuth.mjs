@@ -181,7 +181,9 @@ export function requestHasValidOrigin(request, env = process.env) {
   const requestUrl = new URL(request.url);
   const expectedOrigin = env.APP_ORIGIN || requestUrl.origin;
   const origin = request.headers.get('origin');
-  return Boolean(origin && origin === expectedOrigin && request.headers.get('sec-fetch-site') !== 'cross-site');
+  const fetchSite = request.headers.get('sec-fetch-site');
+  if (!origin || fetchSite === 'cross-site') return false;
+  return origin === expectedOrigin || (fetchSite === 'same-origin' && origin === requestUrl.origin);
 }
 
 export function dashboardSessionLifetimeSeconds() { return SESSION_SECONDS; }

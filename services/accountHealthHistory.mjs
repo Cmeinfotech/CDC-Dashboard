@@ -1,6 +1,17 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { monitorRoot, atomicJson, readJson } from './amazonMonitorStore.mjs';
+export async function healthSnapshots(current) {
+  const folder = path.join(monitorRoot(), 'account-health-history');
+  const files = await fs.readdir(folder).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+  const snapshots = (await Promise.all(files.filter(file => /^\d+\.json$/.test(file)).map(file => readJson(path.join(folder, file))))).filter(snapshot => snapshot && (!current?.marketplaceId || snapshot.marketplaceId === current.marketplaceId));
+  if (current && !snapshots.some(snapshot => snapshot.reportId === current.reportId)) snapshots.push(current);
+  return snapshots.sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+}
+
+export function selectHealthSnapshot(snapshots, startDate, endDate) {
+  return snapshots.filter(snapshot => (!startDate || snapshot.capturedAt.slice(0, 10) >= startDate) && (!endDate || snapshot.capturedAt.slice(0, 10) <= endDate)).at(-1) ?? null;
+}
 export async function saveHealthSnapshot(data) {
   if (!data?.reportId || !/^\d+$/.test(String(data.reportId)) || !data.capturedAt) throw Error('Invalid health snapshot metadata.');
   const file = path.join(monitorRoot(), 'account-health-history', `${data.reportId}.json`);
