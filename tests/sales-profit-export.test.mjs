@@ -1,0 +1,40 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import XLSX from 'xlsx';
+import { unzipSync, strFromU8 } from 'fflate';
+import { liveSalesProfit } from '../services/liveSalesProfit.mjs';
+import { salesProfitWorkbook, writeSalesProfitWorkbook } from '../services/salesProfitWorkbook.mjs';
+import schema from '../services/salesProfitExportSchema.json' with { type: 'json' };
+const rows = Array.from({ length: 125 }, (_, i) => ({ 'amazon-order-id': `001-${i}`, 'purchase-date': '2026-11-01T12:30:00Z', 'order-status': 'Shipped', 'sales-channel': 'Amazon.com', 'fulfillment-channel': 'Amazon', asin: 'B123', sku: '001-SKU', quantity: 1, currency: 'USD', 'item-price': '20', 'shipping-price': 2, 'item-tax': 1, 'shipping-tax': 0, 'item-promotion-discount': 1, 'ship-promotion-discount': 0 }));
+const data = () => liveSalesProfit({ rows, coverageStart: '2026-01-01', coverageEnd: '2026-11-18', pulledAt: '2026-11-18T00:00:00Z' }, null, null, new URLSearchParams({ startDate: '2026-11-01', endDate: '2026-11-10' }));
+test('export matches reference sheet sequence and column sequence, retaining all rows', () => {
+  const book = salesProfitWorkbook(data(), { financeError: 'Access denied' });
+  assert.deepEqual(book.SheetNames.slice(0, schema.length + 1), ['Dashboard', ...schema.map(spec => spec.name)]);
+  const bytes = writeSalesProfitWorkbook(book);
+  const saved = XLSX.read(bytes, { type: 'array', cellDates: true, cellNF: true });
+  const orders = XLSX.utils.sheet_to_json(saved.Sheets['Total Orders'], { header: 1 });
+  assert.equal(orders.length, 128); assert.equal(orders[3][0], '001-0');
+  assert.ok(orders[3][1] instanceof Date); assert.equal(saved.Sheets['Total Orders'].J4.z, '"$"#,##0.00;[Red]("$"#,##0.00)');
+  for (const spec of schema) assert.deepEqual(XLSX.utils.sheet_to_json(saved.Sheets[spec.name], { header: 1 })[spec.headerRow], spec.columns);
+  assert.equal(saved.Sheets.Dashboard.A6.v, 125); assert.equal(saved.Sheets.Dashboard.K6.v, 2625); assert.equal(saved.Sheets.Dashboard.M6.v, 2375);
+  assert.equal(saved.Sheets['Daily Sales'].J4.v, 2750);
+  assert.equal(saved.Sheets['Daily Sales'].M4.v, 125);
+  assert.equal(saved.Sheets['Total Orders'].A4.t, 's');
+  assert.match(JSON.stringify(XLSX.utils.sheet_to_json(saved.Sheets.Read_Me, { header: 1 })), /Access denied/);
+});
+test('export has styled headers, frozen rows, filters, links and no charts', () => {
+  const bytes = writeSalesProfitWorkbook(salesProfitWorkbook(data()));
+  const files = unzipSync(bytes);
+  assert.ok(!Object.keys(files).some(key => /charts|drawings/.test(key)));
+  assert.match(strFromU8(files['xl/styles.xml']), /FF193B60/);
+  assert.match(strFromU8(files['xl/worksheets/sheet1.xml']), /hyperlink/);
+  const orders = strFromU8(files['xl/worksheets/sheet4.xml']);
+  assert.match(orders, /state="frozen"/); assert.match(orders, /autoFilter ref="A3:Q128"/);
+});
+test('historical ledger exports typed month dates and integer warehouse balances',()=>{
+ const d=data();d.tables['Inventory Ledger History']={columns:['Date','Ending Warehouse Balance'],rows:[['05/2026','1234']]};
+ const saved=XLSX.read(writeSalesProfitWorkbook(salesProfitWorkbook(d)),{type:'array',cellDates:true,cellNF:true});
+ assert.equal(saved.Sheets['Inventory Ledger History'].A4.t,'d');
+ assert.equal(saved.Sheets['Inventory Ledger History'].B4.v,1234);
+ assert.equal(saved.Sheets['Inventory Ledger History'].B4.z,'#,##0');
+});

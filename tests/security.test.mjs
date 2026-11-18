@@ -84,6 +84,8 @@ test('retains only numeric gift-wrap amounts and still removes gift content and 
   });
   assert.equal(cleaned['gift-wrap-price'], '2.50'); assert.deepEqual(cleaned['gift-wrap-tax'], { CurrencyCode: 'USD', Amount: 0.2 });
   assert.equal(cleaned['gift-message-text'], undefined); assert.equal(cleaned.buyerEmail, undefined); assert.equal(cleaned.GiftWrapPrice, undefined);
+  assert.deepEqual(minimizeAmazonData({ 'gift-wrap-price': '', 'gift-wrap-tax': '', 'gift-message-text': '' }), { 'gift-wrap-price': '', 'gift-wrap-tax': '' });
+  assert.deepEqual(minimizeAmazonData({ 'gift-wrap-price': 'personal message' }), {});
 });
 test('429 honors retry-after, safe GET retries 503, ambiguous POST never retries', async () => {
   const delays = []; let calls=0;

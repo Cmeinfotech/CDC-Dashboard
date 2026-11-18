@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { gunzipSync } from 'node:zlib';
-import XLSX from 'xlsx';
+import { parseAmazonTsv } from '../services/amazonTsv.mjs';
 import { amazonEndpoint, amazonFetch, amazonUrl, reportDownloadUrl } from '../services/amazonTransport.mjs';
 import { assertAmazonStorage, minimizeAmazonData, readAmazonJson } from '../services/amazonDataSecurity.mjs';
 import { atomicJson, acquireLock } from '../services/amazonMonitorStore.mjs';
 import { boundedBytes } from '../services/boundedBody.mjs';
+import { mergeOrderReportRows } from '../services/mergeOrderReportRows.mjs';
 
 const env = { ...parseEnv(await fs.readFile('.env', 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error))), ...process.env };
 for (const key of ['AMAZON_DATA_KEY', 'AMAZON_ACCESS_REVOKED', 'AMAZON_DATA_RETENTION_DAYS']) if (env[key]) process.env[key] = env[key];
@@ -15,7 +16,10 @@ const marketplaceId = env.AMAZON_MARKETPLACE_ID;
 const endpoint = amazonEndpoint(env.AMAZON_SP_API_REGION, env.AMAZON_SP_API_ENDPOINT);
 if (!marketplaceId) throw Error('AMAZON_MARKETPLACE_ID is required.');
 
-const mode = process.argv.includes('--history') ? 'history' : 'incremental';
+const arg = name => { const index = process.argv.indexOf(name); return index < 0 ? '' : process.argv[index + 1]; };
+const requestedStart = arg('--start'), requestedEnd = arg('--end');
+if ([requestedStart, requestedEnd].some(value => value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value))))) throw Error('Invalid order pull dates.');
+const mode = requestedStart ? 'selected' : process.argv.includes('--history') ? 'history' : 'incremental';
 const output = path.join(process.cwd(), 'outputs', 'amazon-cdc');
 const statusFile = path.join(output, 'order-history-status.json');
 const combinedFile = path.join(output, 'order-report.json');
@@ -56,8 +60,7 @@ async function reportRows(reportId) {
       if (!response.ok) throw Error(`Amazon order-report download failed (${response.status}).`);
       let bytes = Buffer.from(await boundedBytes(response, 128 * 1024 * 1024));
       if (document.compressionAlgorithm === 'GZIP') bytes = gunzipSync(bytes, { maxOutputLength: 256 * 1024 * 1024 });
-      const workbook = XLSX.read(bytes.toString('utf8').replace(/^\uFEFF/, ''), { type: 'string', raw: true, FS: '\t' });
-      return minimizeAmazonData(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' }));
+      return minimizeAmazonData(parseAmazonTsv(bytes.toString('utf8')));
     }
     if (['FATAL', 'CANCELLED'].includes(report.processingStatus)) throw Error(`Amazon order report ${report.processingStatus}.`);
     if (Date.now() >= deadline) throw Error(`Amazon order report is still ${report.processingStatus}; rerun resumes the saved report ID.`);
@@ -69,12 +72,11 @@ function rowKey(row) {
 }
 async function saveCombined(rows, range) {
   const existing = await readAmazonJson(combinedFile, { rows: [] });
-  const merged = new Map((existing.rows || []).map(row => [rowKey(row), row]));
-  for (const row of rows) merged.set(rowKey(row), row);
-  const oldestSavedSale = [...merged.values()].map(row => String(row['purchase-date'] || '').slice(0, 10)).filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort()[0];
+  const merged = mergeOrderReportRows(existing.rows || [], rows, range);
+  const oldestSavedSale = merged.map(row => String(row['purchase-date'] || '').slice(0, 10)).filter(value => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort()[0];
   const coverageStart = [existing.coverageStart || existing.start, oldestSavedSale, range.start].filter(Boolean).sort()[0];
   const coverageEnd = [existing.coverageEnd || existing.end, range.end].filter(Boolean).sort().at(-1);
-  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: range.start, end: range.end, coverageStart, coverageEnd, rows: [...merged.values()] };
+  const data = { marketplaceId, pulledAt: new Date().toISOString(), start: range.start, end: range.end, coverageStart, coverageEnd, rows: merged };
   await atomicJson(combinedFile, data);
   return data.rows.length;
 }
@@ -92,12 +94,14 @@ async function rebuildCombined(status) {
 }
 try {
   await fs.mkdir(output, { recursive: true });
-  const now = new Date();
-  const initialStart = mode === 'history' ? new Date(Date.UTC(now.getUTCFullYear() - 2, now.getUTCMonth(), now.getUTCDate())) : new Date(now.getTime() - 7 * 86400000);
+  const now = requestedEnd ? new Date(Math.min(Date.parse(requestedEnd) + 86400000 - 1, Date.now())) : new Date();
+  const initialStart = requestedStart ? new Date(requestedStart) : mode === 'history' ? new Date(Date.UTC(now.getUTCFullYear() - 2, now.getUTCMonth(), now.getUTCDate())) : new Date(now.getTime() - 7 * 86400000);
+  if (initialStart > now) throw Error('Order pull start must be before end.');
   let status = await readAmazonJson(statusFile, null);
   const canResume = status
     && status.mode === mode
     && status.marketplaceId === marketplaceId
+    && (mode !== 'selected' || status.start === iso(initialStart) && dateOnly(new Date(status.end)) === dateOnly(now))
     && status.status !== 'complete'
     && Array.isArray(status.ranges)
     && status.completed < status.ranges.length;
@@ -107,6 +111,7 @@ try {
   if (!canResume) {
     status = { mode, marketplaceId, startedAt: new Date().toISOString(), start: iso(initialStart), end: iso(now), ranges: chunkRanges(initialStart, now), completed: 0, rows: 0, status: 'running' };
   }
+  if (canResume) { status.status = 'running'; delete status.error; delete status.failedAt; await atomicJson(statusFile, status); }
   for (let index = status.completed; index < status.ranges.length; index++) {
     const range = status.ranges[index];
     const created = range.reportId ? { reportId: range.reportId } : await api('/reports/2021-06-30/reports', { method: 'POST', body: JSON.stringify({ reportType: 'GET_FLAT_FILE_ALL_ORDERS_DATA_BY_ORDER_DATE_GENERAL', marketplaceIds: [marketplaceId], dataStartTime: range.start, dataEndTime: range.end }) });
@@ -121,6 +126,7 @@ try {
   }
   if (mode === 'history') status.rows = await rebuildCombined(status);
   else status.rows = (await readAmazonJson(combinedFile, { rows: [] })).rows.length;
+  delete status.error; delete status.failedAt;
   status.status = 'complete'; status.completedAt = new Date().toISOString(); await atomicJson(statusFile, status);
   console.log(JSON.stringify({ status: 'complete', mode, ranges: status.ranges.length, rows: status.rows }));
 } catch (error) {

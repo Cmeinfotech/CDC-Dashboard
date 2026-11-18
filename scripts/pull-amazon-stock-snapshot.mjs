@@ -1,0 +1,60 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { parseEnv } from 'node:util';
+import { gunzipSync } from 'node:zlib';
+import { parseAmazonTsv } from '../services/amazonTsv.mjs';
+import { atomicJson, monitorRoot, readJson } from '../services/amazonMonitorStore.mjs';
+import { reportDownloadUrl } from '../services/amazonTransport.mjs';
+import { boundedBytes } from '../services/boundedBody.mjs';
+import { resolveSalesProfitStock } from '../services/salesProfitStock.mjs';
+for(const [key,value] of Object.entries(parseEnv(await fs.readFile('.env','utf8').catch(()=>''))))if(process.env[key]==null)process.env[key]=value;
+const {amazonRequest}=await import('../services/amazonSpApi.ts');
+const target=process.argv[2];
+if(!/^\d{4}-\d{2}-\d{2}$/.test(target))throw Error('Provide a snapshot date.');
+const latest=await readJson(path.join(monitorRoot(),'latest.json'));
+const summaries=await Promise.all((latest.runIds||[latest.id]).map(async id=>({id,...await readJson(path.join(monitorRoot(),'runs',id+'.summary.json'))})));
+const match=summaries.filter(row=>row.capturedAt?.slice(0,10)===target).sort((a,b)=>b.capturedAt.localeCompare(a.capturedAt))[0];
+let catalog=match?await readJson(path.join(monitorRoot(),'runs',match.id+'.json')):null;
+if(!catalog){
+ const q=new URLSearchParams({reportTypes:'GET_MERCHANT_LISTINGS_ALL_DATA',processingStatuses:'DONE',createdSince:target+'T00:00:00Z',createdUntil:target+'T23:59:59Z',pageSize:'100'});
+ const {data:index}=await amazonRequest('/reports/2021-06-30/reports?'+q);
+ const report=(index.reports||[]).filter(r=>r.marketplaceIds?.includes(process.env.AMAZON_MARKETPLACE_ID)).sort((a,b)=>b.createdTime.localeCompare(a.createdTime))[0];
+ if(!report)throw Error('No archived listing snapshot for '+target);
+ const {data:document}=await amazonRequest('/reports/2021-06-30/documents/'+encodeURIComponent(report.reportDocumentId));
+ const response=await fetch(reportDownloadUrl(document.url),{redirect:'error',signal:AbortSignal.timeout(180000)});
+ if(!response.ok)throw Error('Archived listing download failed.');
+ let bytes=Buffer.from(await boundedBytes(response,128*1024*1024));if(document.compressionAlgorithm==='GZIP')bytes=gunzipSync(bytes,{maxOutputLength:256*1024*1024});
+ const listings=parseAmazonTsv(bytes.toString('utf8'));
+ if(!listings.length||!Object.hasOwn(listings[0],'seller-sku'))throw Error('Invalid archived listing report.');
+ catalog={marketplaceId:process.env.AMAZON_MARKETPLACE_ID,capturedAt:report.createdTime,products:listings.map(row=>({sku:row['seller-sku'],asin:row.asin1,title:row['item-name'],listing:{status:row.status,quantity:row.quantity,fulfillment:row['fulfillment-channel']}}))};
+}
+let nextToken, candidates=[], pages=0;
+do{
+  const query=nextToken?new URLSearchParams({nextToken}):new URLSearchParams({reportTypes:'GET_FBA_MYI_ALL_INVENTORY_DATA,GET_FBA_MYI_UNSUPPRESSED_INVENTORY_DATA,GET_AFN_INVENTORY_DATA',processingStatuses:'DONE',createdSince:new Date(Math.max(Date.parse(target),Date.now()-89*86400000)).toISOString(),createdUntil:new Date(Date.parse(target)+86400000-1).toISOString(),pageSize:'100'});
+  const {data}=await amazonRequest('/reports/2021-06-30/reports?'+query);
+  candidates.push(...(data.reports||[]));nextToken=data.nextToken;pages++;
+  if(nextToken)await new Promise(resolve=>setTimeout(resolve,2100));
+}while(nextToken);
+const choices=candidates.filter(report=>report.createdTime?.slice(0,10)===target && (!report.marketplaceIds?.length || report.marketplaceIds.includes(process.env.AMAZON_MARKETPLACE_ID))).sort((a,b)=>Number(b.reportType==='GET_FBA_MYI_ALL_INVENTORY_DATA')-Number(a.reportType==='GET_FBA_MYI_ALL_INVENTORY_DATA') || b.createdTime.localeCompare(a.createdTime));
+let selected, rows, source;
+for (const candidate of choices) {
+  const {data:document}=await amazonRequest('/reports/2021-06-30/documents/'+encodeURIComponent(candidate.reportDocumentId));
+  const response=await fetch(reportDownloadUrl(document.url),{redirect:'error',signal:AbortSignal.timeout(180000)});
+  if(!response.ok)throw Error('Archived inventory download failed.');
+  let bytes=Buffer.from(await boundedBytes(response,128*1024*1024));if(document.compressionAlgorithm==='GZIP')bytes=gunzipSync(bytes,{maxOutputLength:256*1024*1024});
+  const parsed=parseAmazonTsv(bytes.toString('utf8'));
+  if(!parsed.length)continue;
+  const field = (row, aliases) => Object.entries(row).find(([key])=>aliases.includes(key.toLowerCase().replace(/[^a-z0-9]/g,'')))?.[1];
+  const items=parsed.map(row=>({sellerSku:field(row,['sku','sellersku']),asin:field(row,['asin']),fnSku:field(row,['fnsku','fulfillmentchannelsku']),condition:field(row,['condition','conditiontype']),inventoryDetails:{fulfillableQuantity:field(row,['afnfulfillablequantity','quantityavailable'])}}));
+  if(!items.some(item=>item.sellerSku && item.inventoryDetails.fulfillableQuantity!==undefined))continue;
+  selected=candidate;rows=parsed;
+  source={marketplaceId:process.env.AMAZON_MARKETPLACE_ID,pulledAt:selected.createdTime,payload:{inventorySummaries:items}};
+  break;
+}
+if(!selected)throw Error('Archived inventory reports for '+target+' contain no usable stock rows.');
+const resolved=resolveSalesProfitStock(catalog,source);
+const snapshot={marketplaceId:catalog.marketplaceId,capturedAt:catalog.capturedAt,inventoryPulledAt:source.pulledAt,source:'Archived Amazon inventory + saved listing snapshot',reportId:selected.reportId,products:resolved.products.map(({sku,asin,title,listing,stockSource,stockCapturedAt})=>({sku,asin,title,listing,stockSource,stockCapturedAt}))};
+await atomicJson(path.join(monitorRoot(),'stock-history',target+'.json'),snapshot);
+const index=await readJson(path.join(monitorRoot(),'stock-history-index.json'),{dates:[]});
+await atomicJson(path.join(monitorRoot(),'stock-history-index.json'),{dates:[...new Set([...index.dates,target])].sort()});
+console.log(JSON.stringify({status:'complete',snapshotDate:target,inventoryRows:rows.length,products:snapshot.products.length,reportDate:selected.createdTime,pages}));

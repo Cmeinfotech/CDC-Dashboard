@@ -133,7 +133,10 @@ export default function AmazonAccountHealth() {
   }, [state?.data]);
   const rating = valueFor(metrics, 'accountHealthRating');
   const odr = valueFor(metrics, 'orderDefectRate');
+  const totalPolicyViolations = valueFor(metrics, 'totalPolicyViolations');
   const policyRows = POLICY_FIELDS.map(([label, category]) => { const metric = valueFor(metrics, category); return { label, category, metric, count: countFrom(metric) }; });
+  const totalPolicyCount = countFrom(totalPolicyViolations) ?? policyRows.reduce((sum, row) => sum + (row.count ?? 0), 0);
+  const policyStatus = totalPolicyViolations?.status || (policyRows.some(row => row.metric?.status === 'BAD') ? 'BAD' : 'GOOD');
 
   const performanceRows: ViewRow[] = metrics.flatMap(metric => {
     if (['lateShipmentRateList', 'orderDefectRate', 'onTimeDeliveryRate', 'unitOnTimeDeliveryRate', 'businessHourDeliveryRate', 'policyViolationWarnings'].includes(metric.category)) return [];
@@ -192,7 +195,7 @@ export default function AmazonAccountHealth() {
   });
 
   function showTable(id: string) {
-    const field = id === 'account-health-metrics' ? 'accountHealthRating.ahrScore' : id === 'account-health-odr' ? 'orderDefectRate.rate' : 'policyViolationWarnings.warningsCount';
+    const field = id === 'account-health-metrics' ? 'accountHealthRating.ahrScore' : id === 'account-health-odr' ? 'orderDefectRate.rate' : 'totalPolicyViolations.defectsCount';
     window.location.href = `/amazon/account-health/details?field=${encodeURIComponent(field)}`;
   }
 
@@ -209,6 +212,7 @@ export default function AmazonAccountHealth() {
         <KpiCard title="Account Health Rating" count={rating?.ahrScore == null ? '—' : String(rating.ahrScore)} subtitle={<AccountHealthStatus compact status={rating?.ahrStatus || 'Not returned'} />} className="account-health-kpi rating" onClick={() => showTable('account-health-metrics')} />
         <KpiCard title="ODR — FBA" count={measuredRate(odr?.afn)} subtitle={<AccountHealthStatus compact status={odr?.afn?.status || 'Not returned'} />} className="account-health-kpi odr" onClick={() => showTable('account-health-odr')} />
         <KpiCard title="ODR — FBM" count={measuredRate(odr?.mfn)} subtitle={<AccountHealthStatus compact status={odr?.mfn?.status || 'Not returned'} />} className="account-health-kpi odr" onClick={() => showTable('account-health-odr')} />
+        <KpiCard title="Policy compliance" count={String(totalPolicyCount)} subtitle={<AccountHealthStatus compact status={policyStatus} />} className="account-health-kpi policy" onClick={() => showTable('account-health-policy')} />
       </div>
 
       <div className="account-health-table-pair health-modern-pair">

@@ -11,7 +11,7 @@ export async function GET(request: Request) {
   try {
     const folder = join(process.cwd(),'outputs','amazon-cdc');
     const optional = async (name: string) => { try { return await readAmazonJson(join(folder,name)); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; } };
-    const [state, report, inventory] = await Promise.all([monitorState(), optional('order-report.json'), optional('inventory.json')]);
+    const [state, report, inventory] = await Promise.all([monitorState({ includeHistory: false }), optional('order-report.json'), optional('inventory.json')]);
     const inventoryInfo = inventory ? await stat(join(folder, 'inventory.json')) : null;
     const dates = (report?.rows || []).filter((r: any) => r['sales-channel'] === 'Amazon.com' && !/cancel/i.test(`${r['order-status']} ${r['item-status']}`)).map((r: any) => String(r['purchase-date'] || '').slice(0, 10)).filter((value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)).sort();
     const todayParts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());

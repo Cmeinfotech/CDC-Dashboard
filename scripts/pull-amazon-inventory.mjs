@@ -3,7 +3,8 @@ import path from 'node:path';
 import { parseEnv } from 'node:util';
 import { amazonFetch, amazonEndpoint, amazonUrl } from '../services/amazonTransport.mjs';
 import { assertAmazonStorage, purgeExpiredAmazonData } from '../services/amazonDataSecurity.mjs';
-import { atomicJson, acquireLock } from '../services/amazonMonitorStore.mjs';
+import { captureSalesProfitStock } from '../services/salesProfitHistory.mjs';
+import { atomicJson, acquireLock, monitorRoot, readJson } from '../services/amazonMonitorStore.mjs';
 
 const envFile = await fs.readFile('.env', 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
 const config = { ...parseEnv(envFile), ...process.env };
@@ -64,7 +65,11 @@ try {
   } while (nextToken);
 
   const pulledAt = new Date().toISOString();
-  await atomicJson(inventoryFile, { marketplaceId: marketplace, pulledAt, payload: { inventorySummaries } });
+  const inventoryData = { marketplaceId: marketplace, pulledAt, payload: { inventorySummaries } };
+  await atomicJson(inventoryFile, inventoryData);
+  const latest = await readJson(path.join(monitorRoot(),'latest.json'));
+  const catalog = latest ? await readJson(path.join(monitorRoot(),'runs',latest.id+'.json')) : null;
+  await captureSalesProfitStock(catalog, inventoryData);
   console.log(JSON.stringify({ status: 'complete', dataset: 'FBA inventory', marketplaceId: marketplace, pulledAt, count: inventorySummaries.length }));
 } finally {
   await release();

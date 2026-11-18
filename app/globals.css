@@ -865,7 +865,9 @@ body { color: var(--ink); background: var(--bg); }
 }
 .kpi:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(18,43,71,.08); }
 .kpi-value b { color: #142a44; font-size: 25px; font-variant-numeric: tabular-nums; }
-.kpi-card { display:flex; min-width:0; min-height:88px; flex-direction:column; align-items:flex-start; justify-content:center; gap:8px; padding:13px 15px; border:1px solid #e0e3e7; border-radius:10px; background:linear-gradient(145deg,#fffefa 0%,#f8f8f6 100%); color:#1c3048; text-align:left; box-shadow:0 2px 6px rgba(18,43,71,.04); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease,background-color .2s ease; }
+.kpi-card { position:relative; display:flex; min-width:0; min-height:88px; flex-direction:column; align-items:flex-start; justify-content:center; gap:8px; padding:13px 15px; border:1px solid #e0e3e7; border-radius:10px; background:linear-gradient(145deg,#fffefa 0%,#f8f8f6 100%); color:#1c3048; text-align:left; box-shadow:0 2px 6px rgba(18,43,71,.04); transition:transform .2s ease,box-shadow .2s ease,border-color .2s ease,background-color .2s ease; }
+.kpi-card-link-arrow { position:absolute; right:12px; bottom:11px; color:#168c99; opacity:.7; transition:transform .18s ease,opacity .18s ease; }
+.kpi-card:hover:not(:disabled) .kpi-card-link-arrow { opacity:1; transform:translateX(3px); }
 .kpi-card-title { color:#65748a; font-size:11px; font-weight:600; line-height:1.35; }
 .kpi-card-count { color:#142a44; font-size:22px; font-weight:700; line-height:1.15; letter-spacing:-.035em; font-variant-numeric:tabular-nums; }
 .kpi-card:hover:not(:disabled) { transform:translateY(-3px); border-color:#85c5d0; background:#fffefa; box-shadow:0 10px 22px rgba(18,43,71,.11); }
@@ -1751,4 +1753,328 @@ tbody tr:hover{background:#f2f9f8}
 .account-health-dashboard .health-modern-table-wrap {
   border: 1px solid #dce7e7;
   border-radius: 8px;
+}
+
+.sales-profit-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(185px,1fr)); gap:16px; margin:24px 0; }
+.sales-profit-comparisons { align-items:start; margin-bottom:24px; }
+.sales-profit-sheets { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; padding:16px; }
+.sales-profit-sheets a { display:flex; flex-direction:column; gap:6px; padding:16px; border:1px solid var(--border,#dce3ec); border-radius:10px; color:inherit; text-decoration:none; }
+.sales-profit-sheets a:hover { background:#edf5ff; }
+.sales-profit-sheets small { color:#62728a; }
+.sales-profit-search { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin:20px 0; }
+.sales-profit-search input { min-width:260px; padding:10px 14px; border:1px solid #cbd5e1; border-radius:8px; }
+.sales-profit-panel .account-health-table td { max-width:340px; overflow-wrap:anywhere; }
+
+/* Shared KPI presentation: Account Health reference across dashboard pages. */
+.app-shell :is(.kpi-card, .account-health-dashboard .account-health-preview-kpis .kpi-card, .tracking-stats > button, .tracking-stats > .clickable-stat, .health-details-stats > div) {
+  position:relative;
+  min-width:0;
+  min-height:110px;
+  height:auto;
+  padding:16px 18px;
+  border:1px solid #e0e9e8;
+  border-radius:10px;
+  background:#fff;
+  box-shadow:0 2px 8px #123d3004;
+  text-align:left;
+  overflow:hidden;
+  gap:8px;
+  justify-content:center;
+  transform:none;
+}
+.app-shell :is(.kpi-card, .tracking-stats > button, .tracking-stats > .clickable-stat, .health-details-stats > div)::before {
+  content:'';
+  position:absolute;
+  inset:16px auto 16px 0;
+  width:3px;
+  border-radius:0 3px 3px 0;
+  background:#44a99d;
+}
+.app-shell .kpi-card .kpi-card-title,
+.app-shell .tracking-stats > button small:first-child,
+.app-shell .tracking-stats > .clickable-stat p,
+.app-shell .health-details-stats > div > span {
+  color:#687e83;
+  font-size:11px;
+  font-weight:550;
+  line-height:1.4;
+  overflow-wrap:anywhere;
+}
+.app-shell .kpi-card .kpi-card-count,
+.app-shell .tracking-stats > button strong,
+.app-shell .tracking-stats > .clickable-stat b,
+.app-shell .health-details-stats > div > strong {
+  display:block;
+  max-width:100%;
+  color:#176f68;
+  font-size:clamp(22px, 1.8vw, 26px);
+  line-height:1.15;
+  letter-spacing:-.035em;
+  font-weight:700;
+  font-variant-numeric:tabular-nums;
+  overflow-wrap:anywhere;
+}
+.app-shell .kpi-card .kpi-card-subtitle,
+.app-shell .tracking-stats > .clickable-stat small,
+.app-shell .health-details-stats > div > small { color:#70858d; font-size:10px; line-height:1.4; }
+.app-shell :is(.kpi-card, .tracking-stats > button, .tracking-stats > .clickable-stat, .health-details-stats > div):hover:not(:disabled) {
+  transform:none;
+  background:#fff;
+  border-color:#a8cfc9;
+  box-shadow:0 4px 14px #125e4f09;
+}
+.app-shell :is(.kpi-card.is-active, .tracking-stats > button.active) {
+  background:#fff;
+  border-color:#8fcac1;
+  box-shadow:0 0 0 1px #44a99d18;
+}
+.app-shell .tracking-stats > button { align-items:center; justify-content:flex-start; }
+.app-shell .tracking-stats > button > svg,
+.app-shell .tracking-stats .stat-icon { display:none; }
+.app-shell .tracking-stats > button > span:nth-child(2) { min-width:0; flex:1; }
+.app-shell .tracking-stats > button strong { margin:6px 0 0; }
+.app-shell .tracking-stats > .clickable-stat b { margin:6px 0; }
+.app-shell :is(.kpi-grid, .performance-summary-kpis, .sales-profit-kpis, .account-health-kpis, .tracking-stats, .catalog-summary-cards, .health-details-stats) {
+  grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));
+  gap:14px;
+  align-items:stretch;
+}
+.app-shell .tracking-stats > button:last-child:nth-child(odd) { grid-column:auto; }
+@media(max-width:600px) {
+  .app-shell :is(.kpi-grid, .performance-summary-kpis, .sales-profit-kpis, .account-health-kpis, .tracking-stats, .catalog-summary-cards, .health-details-stats) {
+    grid-template-columns:repeat(auto-fit,minmax(min(100%,160px),1fr));
+    gap:10px;
+  }
+  .app-shell :is(.kpi-card, .account-health-dashboard .account-health-preview-kpis .kpi-card, .tracking-stats > button, .tracking-stats > .clickable-stat, .health-details-stats > div) { padding:14px 16px; min-height:104px; }
+}
+
+/* Paired metric charts use a separate scale for each comparison row. */
+.sales-profit-comparisons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px; }
+.sales-comparison-chart { min-width:0; overflow:hidden; border:1px solid #dce8eb; border-radius:14px; background:#fff; box-shadow:0 4px 20px #163b4b05; }
+.sales-comparison-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding:17px 18px; background:linear-gradient(120deg,#14394c,#1e5265); color:#fff; }
+.sales-comparison-title { display:flex; align-items:center; gap:9px; }
+.sales-comparison-title > span { display:grid; place-items:center; width:31px; height:31px; border-radius:9px; background:#ffffff14; color:#91e3d6; }
+.sales-comparison-title h3 { margin:0; color:inherit; font-size:14px; font-weight:650; letter-spacing:-.02em; }
+.sales-comparison-legend { display:flex; flex-wrap:wrap; gap:12px; font-size:10px; color:#e6f2f4; }
+.sales-comparison-legend > span,.sales-comparison-periods > span { display:flex; align-items:center; gap:5px; }
+.sales-comparison-legend i,.sales-comparison-periods i { display:inline-block; width:8px; height:8px; border-radius:2px; flex-shrink:0; }
+.sales-bar-current { background:#239d93; }
+.sales-bar-previous { background:#b7c6d3; }
+.sales-comparison-periods { display:flex; flex-wrap:wrap; justify-content:space-between; gap:7px; padding:11px 18px; background:#f6fafa; color:#72858d; font-size:10px; border-bottom:1px solid #e7eeef; }
+.sales-comparison-row { display:grid; grid-template-columns:minmax(110px,1fr) minmax(150px,1.6fr) 83px; gap:12px; align-items:center; min-height:79px; padding:14px 18px; border-bottom:1px solid #edf2f3; color:inherit; text-decoration:none; transition:background .15s ease; }
+.sales-comparison-row:hover { background:#f5fbfa; }
+.sales-comparison-row:focus-visible { outline:2px solid #239d93; outline-offset:-3px; }
+.sales-comparison-label { min-width:0; color:#345461; font-size:11px; line-height:1.45; font-weight:600; overflow-wrap:anywhere; }
+.sales-comparison-label > small { display:block; color:#8c9ba1; font-size:9px; font-weight:400; margin-top:3px; }
+.sales-comparison-bars { display:grid; gap:6px; min-width:0; }
+.sales-comparison-bar-line { display:grid; grid-template-columns:minmax(35px,1fr) minmax(69px,auto); align-items:center; gap:8px; }
+.sales-comparison-track { display:block; height:9px; overflow:hidden; border-radius:3px; background:#edf3f4; }
+.sales-comparison-track.is-unavailable { background:repeating-linear-gradient(135deg,#f0f3f5,#f0f3f5 4px,#fafbfc 4px,#fafbfc 8px); }
+.sales-comparison-fill { display:block; height:100%; border-radius:3px; }
+.sales-comparison-fill.sales-bar-current { background:linear-gradient(90deg,#38b6a8,#188a85); }
+.sales-comparison-value { color:#345566; font-size:10px; font-weight:650; font-variant-numeric:tabular-nums; white-space:nowrap; text-align:right; }
+.sales-comparison-value.previous { color:#8b9ca8; font-weight:400; }
+.sales-comparison-change { display:grid; justify-items:center; gap:3px; padding:8px 4px; border-radius:8px; font-size:10px; font-weight:650; font-variant-numeric:tabular-nums; }
+.sales-comparison-change > span { display:flex; align-items:center; gap:2px; }
+.sales-comparison-change small { font-size:8px; font-weight:400; }
+.sales-comparison-change.positive { background:#e7f6ed; color:#228259; }
+.sales-comparison-change.negative { background:#fff0ec; color:#c46853; }
+.sales-comparison-change.neutral { background:#f0f4f6; color:#8697a0; }
+.sales-comparison-chart footer { padding:11px 18px; color:#8a9ca4; background:#fbfdfd; font-size:9px; line-height:1.5; }
+@media(max-width:1250px) { .sales-profit-comparisons { grid-template-columns:1fr; } }
+@media(max-width:600px) {
+  .sales-comparison-row { grid-template-columns:minmax(0,1fr) 76px; gap:9px 12px; padding:14px; }
+  .sales-comparison-label { grid-column:1; }
+  .sales-comparison-bars { grid-column:1; grid-row:2; }
+  .sales-comparison-change { grid-column:2; grid-row:1 / 3; }
+  .sales-comparison-head,.sales-comparison-periods { padding:13px 14px; }
+}
+
+.sales-monthly-history { margin:26px 0; padding:20px; border:1px solid #dce8eb; border-radius:14px; background:#f9fcfc; }
+.sales-monthly-history > header { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-bottom:18px; }
+.sales-monthly-history h2 { margin:0; color:#244e59; font-size:18px; }
+.sales-monthly-history h3 { font-size:13px; color:#345866; }
+.sales-monthly-history header p,.sales-history-caption { font-size:10px; color:#788e96; line-height:1.6; }
+.sales-monthly-history header > span { padding:7px 10px; border-radius:7px; background:#e5f4f1; color:#25877b; font-size:11px; }
+.sales-history-charts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+.sales-history-chart { padding:16px; border:1px solid #e0ebed; border-radius:12px; background:#fff; }
+.sales-history-chart h3 { margin:0 0 10px; }
+.sales-history-legend { display:flex; flex-wrap:wrap; gap:12px; font-size:9px; color:#708991; margin-bottom:10px; }
+.sales-history-legend > span { display:flex; align-items:center; gap:5px; }
+.sales-history-legend i { height:7px; width:7px; background:#229d92; border-radius:2px; }
+.sales-history-legend span:last-child i { background:#afc2d1; }
+.sales-history-month { display:grid; width:100%; grid-template-columns:100px minmax(0,1fr); gap:12px; align-items:center; padding:13px 0; border:0; border-bottom:1px solid #edf2f3; background:#fff; text-align:left; }
+.sales-history-month:hover { background:#f4fbf9; }
+.sales-history-month:focus-visible { outline:2px solid #229d92; outline-offset:3px; }
+.sales-history-month-label { color:#345866; font-size:11px; font-weight:600; }
+.sales-history-month-label small { display:block; font-weight:400; color:#93a3aa; font-size:8px; margin-top:4px; }
+.sales-history-bars { display:grid; gap:7px; min-width:0; }
+.sales-history-line { display:grid; grid-template-columns:minmax(20px,1fr) 73px; align-items:center; gap:8px; }
+.sales-history-track { display:block; height:8px; border-radius:3px; background:#eef4f4; overflow:hidden; }
+.sales-history-track.is-missing { background:repeating-linear-gradient(135deg,#edf2f4,#edf2f4 4px,#fafcfc 4px,#fafcfc 8px); }
+.sales-history-track i { display:block; height:100%; background:linear-gradient(90deg,#42bba9,#22958e); border-radius:3px; }
+.sales-history-track i.secondary-series { background:#afc2d1; }
+.sales-history-line b { text-align:right; color:#4b6877; font-size:10px; font-variant-numeric:tabular-nums; }
+.sales-history-stock { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; }
+.sales-history-stock > div { display:grid; gap:8px; background:#fff; padding:12px; border:1px solid #e0ebed; border-radius:9px; }
+.sales-history-stock span { color:#7b929a; font-size:10px; }
+.sales-history-stock strong { color:#277c73; font-size:16px; }
+@media(max-width:1050px) { .sales-history-charts { grid-template-columns:1fr; } }
+@media(max-width:600px) { .sales-monthly-history { padding:14px; } .sales-history-chart { padding:12px; } .sales-history-month { grid-template-columns:85px minmax(0,1fr); gap:8px; } }
+
+/* Keep comparison panels aligned while allowing their rows to share the height. */
+.sales-profit-panel { min-width:0; max-width:100%; }
+.sales-profit-panel .sales-profit-comparisons { align-items:stretch; }
+.sales-profit-comparisons > .sales-comparison-chart { display:flex; flex-direction:column; min-width:0; }
+.sales-profit-comparisons .sales-comparison-head { min-height:78px; flex-shrink:0; }
+.sales-profit-comparisons .sales-comparison-periods { min-height:49px; flex-shrink:0; align-content:center; }
+.sales-profit-comparisons .sales-comparison-rows { display:flex; flex-direction:column; flex:1; min-width:0; }
+.sales-profit-comparisons .sales-comparison-row { flex:1 0 auto; }
+.sales-fulfillment-chart { margin-top:20px; padding:18px 20px 20px; border:1px solid #dfe8e9; border-radius:12px; background:#fff; }
+.sales-fulfillment-chart header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-bottom:14px; border-bottom:1px solid #e7eeee; }
+.sales-fulfillment-chart header>div:first-child { display:flex; align-items:center; gap:9px; }
+.sales-fulfillment-chart h3 { margin:0; color:#24464e; font-size:14px; text-transform:uppercase; letter-spacing:.03em; }
+.sales-fulfillment-icon { display:grid; place-items:center; width:28px; height:28px; border-radius:7px; background:#e9f7f7; color:#138e91; }
+.sales-fulfillment-legend { display:flex; gap:14px; color:#72868e; font-size:10px; }
+.sales-fulfillment-legend span { display:flex; align-items:center; gap:5px; }
+.sales-fulfillment-legend i { width:8px; height:8px; border-radius:2px; display:inline-block; }
+.sales-fulfillment-periods { display:flex; justify-content:flex-end; padding:12px 0; color:#84999e; font-size:10px; }
+.sales-fulfillment-bars { display:grid; grid-template-columns:repeat(2,minmax(180px,1fr)); gap:clamp(40px,12vw,180px); max-width:760px; margin:0 auto; }
+.sales-fulfillment-group { text-align:center; }
+.sales-fulfillment-label { min-height:32px; color:#2b4b53; font-size:11px; font-weight:700; }
+.sales-fulfillment-columns { height:180px; display:flex; align-items:flex-end; justify-content:center; gap:18px; padding:0 16%; border-bottom:1px solid #cfdfdf; background:repeating-linear-gradient(to top,transparent 0,transparent 44px,#edf3f3 45px); }
+.sales-fulfillment-columns>div { height:100%; width:52px; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; gap:6px; }
+.sales-fulfillment-columns b { order:-1; color:#3c5660; font-size:11px; white-space:nowrap; }
+.sales-fulfillment-bar { display:block; width:100%; min-height:2px; border-radius:5px 5px 0 0; }
+.sales-fulfillment-group>small { display:inline-block; margin-top:10px; padding:7px 12px; border-radius:7px; background:#e7f7ed; color:#148450; font-size:10px; font-weight:700; }
+.sales-fulfillment-group>small.down { background:#fff0ef; color:#c94b4b; }
+.sales-comparison-title { min-width:0; }
+.sales-comparison-title > span { flex-shrink:0; }
+.sales-comparison-periods > span { min-width:0; overflow-wrap:anywhere; }
+.sales-comparison-value { min-width:0; }
+.sales-profit-panel .account-health-head { flex-wrap:wrap; gap:14px; }
+.sales-profit-panel .account-health-actions { min-width:0; }
+@media(max-width:1250px) {
+  .sales-profit-panel .sales-profit-comparisons { grid-template-columns:minmax(0,1fr); }
+  .sales-profit-comparisons .sales-comparison-head,
+  .sales-profit-comparisons .sales-comparison-periods { min-height:0; }
+  .sales-profit-comparisons .sales-comparison-row { flex:none; }
+}
+@media(max-width:600px) {
+  .sales-profit-panel { padding:16px; }
+  .sales-profit-panel .account-health-head { align-items:flex-start; }
+  .sales-profit-panel .account-health-head h2 { font-size:18px; }
+  .sales-profit-panel .account-health-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); width:100%; }
+  .sales-profit-panel .account-health-actions button { width:100%; min-width:0; height:auto; min-height:40px; padding:9px 7px; white-space:normal; }
+  .sales-profit-comparisons { gap:16px; }
+  .sales-comparison-row { grid-template-columns:minmax(0,1fr) 72px; min-height:100px; }
+  .sales-comparison-bar-line { grid-template-columns:minmax(20px,1fr) minmax(0,105px); }
+  .sales-comparison-value { white-space:normal; overflow-wrap:anywhere; }
+  .sales-comparison-change { min-width:0; }
+  .sales-fulfillment-chart { padding:14px 12px; }
+  .sales-fulfillment-chart header { align-items:flex-start; flex-direction:column; }
+  .sales-fulfillment-bars { grid-template-columns:1fr; gap:28px; }
+  .sales-fulfillment-periods { padding-inline:0; }
+}
+@media(max-width:360px) {
+  .sales-profit-panel { padding:12px; }
+  .sales-profit-panel .account-health-actions { grid-template-columns:minmax(0,1fr); }
+  .sales-comparison-row { padding:12px; gap:8px; grid-template-columns:minmax(0,1fr) 66px; }
+  .sales-comparison-bar-line { grid-template-columns:minmax(12px,1fr) minmax(0,88px); gap:5px; }
+}
+
+/* Semantic change colors: lower cancellations/costs are favorable. */
+.app-shell .sales-profit-kpis .sales-kpi-cancelled { background:#fff7f7; border-color:#efc5c5; }
+.app-shell .sales-profit-kpis .sales-kpi-cancelled::before { background:#d84646; }
+.app-shell .sales-profit-kpis .sales-kpi-cancelled .kpi-card-title,
+.app-shell .sales-profit-kpis .sales-kpi-cancelled .kpi-card-count { color:#bc3030; }
+.sales-comparison-row.sales-row-cancelled { background:#fff8f8; }
+.sales-row-cancelled .sales-comparison-label,
+.sales-row-cancelled .sales-comparison-value.current { color:#bc3030; }
+.sales-row-cancelled .sales-comparison-fill.sales-bar-current { background:linear-gradient(90deg,#ed8585,#cb4141); }
+.sales-comparison-value.current.value-positive { color:#187548; }
+.sales-comparison-value.current.value-negative { color:#bc3030; }
+.sales-row-cancelled .sales-comparison-value.current.value-positive { color:#bc3030; }
+.sales-comparison-change.negative { background:#fdeaea; color:#bc3030; }
+.sales-comparison-value { font-variant-numeric:tabular-nums; }
+
+/* Sales detail tables: readable columns with local horizontal scrolling. */
+.sales-profit-details .sales-detail-scroll { width:100%; max-width:100%; overflow:auto; max-height:70vh; border:1px solid #dce9e8; border-radius:12px; background:#fff; scrollbar-color:#9ecac4 #f2f7f7; }
+.sales-profit-details .sales-detail-table { width:max-content; min-width:100%; table-layout:auto; border-collapse:separate; border-spacing:0; }
+.sales-profit-details .sales-detail-table th { position:sticky; top:0; z-index:2; background:#e8f4f1; color:#28645f; font-size:10px; font-weight:700; letter-spacing:.035em; height:48px; padding:13px 16px; border:0; border-bottom:1px solid #cde3dd; text-align:left; white-space:nowrap; }
+.sales-profit-details .sales-detail-table td { height:auto; min-width:0; max-width:none; padding:14px 16px; font-size:11px; line-height:1.6; color:#4b6570; border:0; border-bottom:1px solid #eaf0ef; text-align:left; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.sales-profit-details .sales-detail-table tbody tr:nth-child(even) { background:#f8fbfa; }
+.sales-profit-details .sales-detail-table tbody tr:hover { background:#edf8f5; }
+.sales-profit-details .sales-detail-table .detail-text { width:340px; min-width:280px; max-width:380px; white-space:normal; overflow-wrap:anywhere; text-align:left; }
+.sales-profit-details .sales-detail-table .detail-number { min-width:110px; text-align:right; }
+.sales-profit-details .sales-detail-table .detail-identifier { min-width:145px; text-align:left; }
+.sales-profit-details .sales-detail-table td:first-child { color:#274f59; font-weight:600; }
+.sales-status { display:inline-block; padding:4px 9px; background:#e7f5ed; color:#267c54; border-radius:6px; font-size:10px; font-weight:600; }
+.sales-status.cancelled { background:#fdeaea; color:#b83333; }
+.sales-profit-details .sales-profit-search { justify-content:space-between; padding:14px 0 4px; color:#45666e; font-size:12px; }
+.sales-profit-details .sales-profit-search input { width:min(100%,360px); min-width:0; background:#f9fcfb; border-color:#d8e7e3; border-radius:9px; padding:12px 14px; }
+.sales-detail-count { color:#7b9097; font-size:11px; margin:12px 0; }
+.sales-detail-filter-button { display:inline-flex; align-items:center; gap:6px; height:38px; padding:0 12px; border:1px solid #d4e0eb; border-radius:8px; background:#fff; color:#52677f; font-size:11px; }
+.sales-detail-filter-button:hover,.sales-detail-filter-button.active { border-color:#63c1c9; color:#087f91; background:#f1fbfb; }
+.sales-profit-details { position:relative; }
+.sales-sheet-filter-menu { position:absolute; top:72px; right:20px; z-index:80; width:270px; padding:10px; display:grid; gap:4px; border:1px solid #d8e7e3; border-radius:10px; background:#fff; box-shadow:0 12px 30px #173d4b20; }
+.sales-sheet-filter-menu a { padding:8px 10px; border-radius:7px; color:#54727b; text-decoration:none; font-size:11px; }
+.sales-sheet-filter-menu a:hover,.sales-sheet-filter-menu a.active { color:#087f91; background:#effafa; font-weight:700; }
+.sales-sheet-filter-heading { padding:5px 10px 3px; color:#879ba0; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; }
+.sales-sheet-filter-search { display:flex; align-items:center; gap:3px; border:1px solid #d8e7e3; border-radius:7px; padding:0 5px; }
+.sales-sheet-filter-search input { width:100%; min-width:0; height:34px; border:0; outline:0; background:transparent; color:#345966; font-size:11px; padding:0 5px; }
+.sales-sheet-filter-search button { display:grid; place-items:center; border:0; background:transparent; color:#718b91; padding:4px; }
+.sales-profit-details .account-health-head { position:relative; }
+.sales-profit-route > .breadcrumbs,
+.sales-profit-route > .page-heading { display:none; }
+.account-health-route > .breadcrumbs,
+.account-health-route > .page-heading { display:none; }
+.account-health-preview-kpis { grid-template-columns:repeat(4,minmax(0,1fr)); }
+.account-health-preview-kpis .account-health-kpi.policy .kpi-card-count { color:#7c4a9e; }
+@media(max-width:1000px) { .account-health-preview-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media(max-width:520px) { .account-health-preview-kpis { grid-template-columns:1fr; } }
+.sales-detail-filter-popover { position:relative; display:flex; align-items:center; gap:8px; padding:5px 8px; border:1px solid #d8e7e3; border-radius:9px; background:#fff; box-shadow:0 5px 18px #173d4b12; }
+.sales-detail-filter-popover label { color:#54727b; font-size:10px; white-space:nowrap; }
+.sales-detail-filter-popover>div { display:flex; align-items:center; gap:3px; }
+.sales-detail-filter-popover .sales-detail-toolbar-search { border:0; background:transparent; height:28px; width:220px; padding:4px 6px; }
+.sales-detail-filter-popover>div>button { display:grid; place-items:center; border:0; background:transparent; color:#718b91; padding:4px; }
+.sales-sheet-tabs { display:flex; gap:6px; align-items:center; margin:14px 0 4px; border-bottom:1px solid #e1eceb; }
+.sales-sheet-tabs a { padding:9px 14px; color:#54727b; border-bottom:2px solid transparent; font-size:12px; text-decoration:none; }
+.sales-sheet-tabs a:hover { color:#087f91; background:#f2faf9; }
+.sales-sheet-tabs a.active { color:#087f91; border-bottom-color:#18a999; font-weight:700; }
+.sales-profit-details .account-health-pagination { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:12px; padding:16px 0 0; }
+.sales-profit-details .account-health-pagination button { padding:9px 15px; border:1px solid #cde2dc; border-radius:8px; color:#29776d; background:#f5fbf8; }
+@media(max-width:600px) {
+  .sales-profit-details .sales-profit-search { display:grid; gap:9px; }
+  .sales-profit-details .sales-profit-search input { width:100%; }
+  .sales-profit-details .sales-detail-table th,.sales-profit-details .sales-detail-table td { padding:11px 12px; }
+  .sales-profit-details .sales-detail-table .detail-text { min-width:230px; max-width:280px; }
+  .sales-profit-details .account-health-pagination { justify-content:center; }
+}
+
+.sales-profit-details .sales-detail-toolbar-search { width:260px; min-width:0; height:38px; padding:9px 12px; border:1px solid #d8e7e3; border-radius:8px; background:#f9fcfb; color:#345966; font-size:11px; }
+.sales-profit-details .account-health-actions { align-items:center; }
+@media(max-width:900px) { .sales-profit-details .account-health-head { align-items:flex-start; } .sales-profit-details .account-health-actions { flex-wrap:wrap; } }
+@media(max-width:600px) { .sales-profit-details .sales-detail-toolbar-search { width:100%; grid-column:1 / -1; } }
+@media(max-width:600px) { .sales-detail-filter-popover { order:3; width:100%; justify-content:space-between; } .sales-detail-filter-popover>div { flex:1; } .sales-detail-filter-popover .sales-detail-toolbar-search { width:100%; } }
+
+/* Use the available workspace width consistently across dashboard pages. */
+.persistent-dashboard-shell > main > .page-wrap {
+  scrollbar-width: none;
+}
+.persistent-dashboard-shell > main > .page-wrap::-webkit-scrollbar {
+  display: none;
+}
+.app-shell main > .page-wrap,
+.app-shell main > .page-wrap:has(.tracking-workspace),
+.app-shell main > .dashboard-fixed-filters {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+  padding-inline: 8px;
+}
+@media(max-width:600px) {
+  .app-shell main > .page-wrap,
+  .app-shell main > .page-wrap:has(.tracking-workspace),
+  .app-shell main > .dashboard-fixed-filters { padding-inline: 6px; }
 }

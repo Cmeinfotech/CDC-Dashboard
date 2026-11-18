@@ -1,9 +1,11 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, Check, ChevronDown, ChevronLeft, ChevronRight, Layers3, Search, X } from "lucide-react";
 
 type DateRange = {
+  availableRange: { startDate: string; endDate: string };
+  setAvailableRange: (startDate: string, endDate: string) => void;
   startDate: string;
   endDate: string;
   draftStartDate: string;
@@ -18,6 +20,8 @@ type DateRange = {
 const GlobalDateRangeContext = createContext<DateRange | null>(null);
 
 export function GlobalDateRangeProvider({ children }: { children: React.ReactNode }) {
+  const [availableRange, setAvailableRangeState] = useState({ startDate: "", endDate: "" });
+  const setAvailableRange = useCallback((startDate: string, endDate: string) => setAvailableRangeState(current => current.startDate === startDate && current.endDate === endDate ? current : { startDate, endDate }), []);
   const [range, setRange] = useState({ startDate: "", endDate: "" });
   const [draftRange, setDraftRange] = useState({ startDate: "", endDate: "" });
   const [selectedProductParents, setSelectedProductParentsState] = useState<string[]>([]);
@@ -40,6 +44,8 @@ export function GlobalDateRangeProvider({ children }: { children: React.ReactNod
   const value = useMemo(
     () => ({
       ...range,
+      availableRange,
+      setAvailableRange,
       draftStartDate: draftRange.startDate,
       draftEndDate: draftRange.endDate,
       selectedProductParents,
@@ -61,7 +67,7 @@ export function GlobalDateRangeProvider({ children }: { children: React.ReactNod
         try { localStorage.setItem("cdc-dashboard-date-range", JSON.stringify(cleared)); } catch { /* The in-memory filter still works when storage is unavailable. */ }
       },
     }),
-    [range, draftRange, selectedProductParents],
+    [range, draftRange, selectedProductParents, availableRange, setAvailableRange],
   );
 
   return <GlobalDateRangeContext.Provider value={value}>{children}</GlobalDateRangeContext.Provider>;
@@ -116,7 +122,11 @@ export function getAvailableDateRange(data: { dailySales?: { date: string }[]; m
 }
 
 export function GlobalDateRangeFilter({ products, defaultRange, showProducts = true }: { products?: ProductOption[]; defaultRange?: { startDate: string; endDate: string }; showProducts?: boolean } = {}) {
-  const { startDate, endDate, draftStartDate, draftEndDate, setDraftDateRange, applyDateRange, clearDateRange } = useGlobalDateRange();
+  const { startDate, endDate, draftStartDate, draftEndDate, setDraftDateRange, applyDateRange, clearDateRange, setAvailableRange } = useGlobalDateRange();
+  const availableStart = defaultRange?.startDate || "", availableEnd = defaultRange?.endDate || "";
+  useEffect(() => {
+    setAvailableRange(availableStart, availableEnd);
+  }, [availableStart, availableEnd, setAvailableRange]);
   const [remoteProducts, setRemoteProducts] = useState<ProductOption[]>([]);
   const [pickerMode, setPickerMode] = useState<"presets" | "calendar" | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date());

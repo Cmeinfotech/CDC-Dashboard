@@ -19,7 +19,9 @@ const sensitive = /buyer|customer|recipient|address|postal|postcode|zip.?code|ph
 const giftMoneyField = /^(?:gift[-_ ]?wrap[-_ ]?(?:price|tax)|giftwrap(?:price|tax))$/i;
 function safeGiftMoney(value) {
   if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value === 'string') return /^-?\d+(?:\.\d+)?$/.test(value.trim());
+  // Report columns use an empty string for no charge. Preserve the column so
+  // consumers can distinguish that from a field Amazon did not return at all.
+  if (typeof value === 'string') return value.trim() === '' || /^-?\d+(?:\.\d+)?$/.test(value.trim());
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const entries = Object.entries(value);
   return entries.length > 0 && entries.every(([field, item]) =>
@@ -49,7 +51,15 @@ export function openAmazonData(text, file, fallback = null, now = Date.now()) {
   const value = JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, 'base64')), decipher.final()]).toString('utf8'));
   return envelope.expiresAt <= now ? fallback : value;
 }
+const pendingReads = new Map();
 export async function readAmazonJson(file, fallback = null) {
+  assertAmazonStorage();
+  const key = path.resolve(file);
+  let pending = pendingReads.get(key);
+  if (!pending) { pending = readAmazonJsonUnshared(file); pendingReads.set(key,pending); pending.finally(()=>{if(pendingReads.get(key)===pending)pendingReads.delete(key);}).catch(()=>{}); }
+  const value = await pending; return value == null ? fallback : value;
+}
+async function readAmazonJsonUnshared(file, fallback = null) {
   try { return openAmazonData(await fs.readFile(file, 'utf8'), file, fallback); }
   catch (error) { if (error.code === 'ENOENT') return fallback; throw error; }
 }

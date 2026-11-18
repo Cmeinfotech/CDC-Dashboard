@@ -133,6 +133,7 @@ async function syncNow() {
       ['FBA inventory', 'pull-amazon-inventory.mjs'],
       ['Account Health', 'pull-amazon-account-health.mjs'],
       ['Recent order updates', 'pull-amazon-orders-history.mjs'],
+      ['Sales and profit financial transactions', 'pull-amazon-sales-profit-finances.mjs'],
     ], script => run(script, Math.min(pullBudgetMs, remainingBudget(databaseBudgetMs))), currentJobs => writeAutomation({ status: 'running', jobs: currentJobs }));
     jobs.push(...pulls);
     const databaseJobs = await runPullJobs([['Dashboard database', 'sync-amazon-pull-to-database.mjs']], script => run(script, remainingBudget()), currentJobs => writeAutomation({ status: 'running', jobs: [...jobs, ...currentJobs] }));

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ArrowRight } from "lucide-react";
 
 type KpiCardProps = {
   title: string;
@@ -12,7 +13,7 @@ type KpiCardProps = {
 
 export default function KpiCard({ title, count, subtitle, className = "", onClick, selected = false, disabled = false }: KpiCardProps) {
   const classes = `kpi-card${className ? ` ${className}` : ""}${selected ? " is-active" : ""}`;
-  const content = <><span className="kpi-card-title">{title}</span><strong className="kpi-card-count">{count}</strong>{subtitle != null && <span className="kpi-card-subtitle">{subtitle}</span>}</>;
+  const content = <><span className="kpi-card-title">{title}</span><strong className="kpi-card-count">{count}</strong>{subtitle != null && <span className="kpi-card-subtitle">{subtitle}</span>}{onClick && <ArrowRight className="kpi-card-link-arrow" size={14} aria-hidden="true" />}</>;
 
   if (onClick) {
     return <button type="button" className={classes} aria-pressed={selected} disabled={disabled} onClick={onClick}>{content}</button>;

@@ -70,6 +70,7 @@ import {
 } from "../services/dashboardService";
 import AmazonMonitor from "./AmazonMonitor";
 import AmazonAccountHealth from "./AmazonAccountHealth";
+import AmazonSalesProfit from "./AmazonSalesProfit";
 import AmazonProductCatalog from "./AmazonProductCatalog";
 import DashboardNotifications, { useDashboardNotifications } from "./DashboardNotifications";
 import AdminUsers from "./AdminUsers";
@@ -79,7 +80,7 @@ import KpiCard from "./KpiCard";
 import { GlobalDateRangeFilter, getAvailableDateRange, useGlobalDateRange } from "./GlobalDateRange";
 import type { Product } from "../mocks/dashboardData";
 
-type Page = "notifications" | "users" | "accountHealth" | "analytics" | "productPerformance" | "productCatalog" | "allSales" | "orders" | "tracking" | "attributes" | "changeHistory";
+type Page = "notifications" | "users" | "salesProfit" | "accountHealth" | "analytics" | "productPerformance" | "productCatalog" | "allSales" | "orders" | "tracking" | "attributes" | "changeHistory";
 type AccountId = "cdc" | "nana-jewellers";
 type Toast = {
   id: number;
@@ -98,6 +99,7 @@ const NAV = [
   { id: "analytics" as Page, label: "Sales Analytics", icon: BarChart3 },
   { id: "orders" as Page, label: "Orders", icon: Receipt },
   { id: "accountHealth" as Page, label: "Amazon Account Health", icon: ShieldCheck },
+  { id: "salesProfit" as Page, label: "Sales & Profit", icon: Receipt },
   { id: "changeHistory" as Page, label: "Change History", icon: History },
   { id: "users" as Page, label: "User Management", icon: Users },
 ];
@@ -294,11 +296,11 @@ export default function DashboardApp({ children }: { children?: React.ReactNode 
   useEffect(() => {
     setLoading(true);
     setTracking(null);
-    const requestedPage = window.location.pathname.startsWith('/amazon/account-health') ? 'accountHealth'
+    const requestedPage = window.location.pathname.startsWith('/amazon/sales-profit') ? 'salesProfit' : window.location.pathname.startsWith('/amazon/account-health') ? 'accountHealth'
       : window.location.pathname === '/amazon/product' ? 'productCatalog'
       : window.location.pathname.startsWith('/amazon/') ? 'tracking'
       : new URLSearchParams(window.location.search).get("page");
-    const initialPage: Page = requestedPage === "notifications" ? "notifications" : requestedPage === "users" ? "users" : account === "cdc" ? requestedPage === "accountHealth" ? "accountHealth" : requestedPage === "attributes" ? "attributes" : requestedPage === "allSales" ? "allSales" : requestedPage === "orders" ? "orders" : requestedPage === "tracking" ? "tracking" : requestedPage === "productPerformance" ? "productPerformance" : requestedPage === "productCatalog" ? "productCatalog" : "analytics" : "analytics";
+    const initialPage: Page = requestedPage === "notifications" ? "notifications" : requestedPage === "users" ? "users" : account === "cdc" ? requestedPage === "salesProfit" ? "salesProfit" : requestedPage === "accountHealth" ? "accountHealth" : requestedPage === "attributes" ? "attributes" : requestedPage === "allSales" ? "allSales" : requestedPage === "orders" ? "orders" : requestedPage === "tracking" ? "tracking" : requestedPage === "productPerformance" ? "productPerformance" : requestedPage === "productCatalog" ? "productCatalog" : "analytics" : "analytics";
     setVisitedPages(new Set<Page>([initialPage]));
     setPage(initialPage);
     refreshData();
@@ -421,6 +423,7 @@ export default function DashboardApp({ children }: { children?: React.ReactNode 
     notifications: ["Notifications", "Product, price, stock, and account-health alerts in one place."],
     users: ["User Management", "Create dashboard users and assign their access."],
     accountHealth: ["Amazon Account Health", ""],
+    salesProfit: ["Sales & Profit", ""],
     changeHistory: ["Change History", "See who made each recorded change and what changed."],
     analytics: ["Sales Analytics", ""],
     productPerformance: ["Product Performance", "Compare sales, orders, units, and growth for each parent product."],
@@ -599,7 +602,7 @@ export default function DashboardApp({ children }: { children?: React.ReactNode 
               ))}
             </div>}
           </div>
-          {NAV.filter(item => item.id !== "analytics" && (account === "cdc" || item.id !== "accountHealth") && (item.id !== "users" || canManageUsers)).map((item) => (
+          {NAV.filter(item => item.id !== "analytics" && (account === "cdc" || (item.id !== "accountHealth" && item.id !== "salesProfit")) && (item.id !== "users" || canManageUsers)).map((item) => (
             <button
               key={item.id}
               className={page === item.id ? "active" : ""}
@@ -713,7 +716,7 @@ export default function DashboardApp({ children }: { children?: React.ReactNode 
         <div className="dashboard-fixed-filters">
           <GlobalDateRangeFilter products={data?.products || []} defaultRange={getAvailableDateRange(data)} />
         </div>
-        <div className={`page-wrap${children ? ' dashboard-route-content' : ''}`}>
+        <div className={`page-wrap${children ? ' dashboard-route-content' : ''}${page === 'salesProfit' ? ' sales-profit-route' : ''}${page === 'accountHealth' ? ' account-health-route' : ''}`}>
           {children || <>
           <div className="breadcrumbs">
             Workspace <ChevronRight size={13} /> <span>{titles[page][0]}</span>
@@ -726,7 +729,7 @@ export default function DashboardApp({ children }: { children?: React.ReactNode 
             {account === 'cdc' && ['tracking', 'attributes'].includes(page) && <div id="amazon-export-action" />}
             {account === 'cdc' && page === 'productCatalog' && <div id="product-catalog-actions" />}
           </div>
-            {page === "notifications" ? <DashboardNotifications model={notifications} /> : page === "users" ? <AdminUsers /> : account === "cdc" && page === "accountHealth" ? <AmazonAccountHealth /> : account === "cdc" && (page === "tracking" || page === "attributes") ? <AmazonMonitor key={page} scope={page === "tracking" ? "tracking" : "attributes"} selectedProductParents={selectedProductParents} /> : page === "changeHistory" ? <ChangeHistoryView account={account} /> : loading || (needsTracking && (trackingLoading || !tracking)) ? (
+            {page === "notifications" ? <DashboardNotifications model={notifications} /> : page === "users" ? <AdminUsers /> : account === "cdc" && page === "salesProfit" ? <AmazonSalesProfit /> : account === "cdc" && page === "accountHealth" ? <AmazonAccountHealth /> : account === "cdc" && (page === "tracking" || page === "attributes") ? <AmazonMonitor key={page} scope={page === "tracking" ? "tracking" : "attributes"} selectedProductParents={selectedProductParents} /> : page === "changeHistory" ? <ChangeHistoryView account={account} /> : loading || (needsTracking && (trackingLoading || !tracking)) ? (
             <DashboardSkeleton />
           ) : dashboardError ? (
             <div role="alert" className="card"><p>{dashboardError}</p><button onClick={() => refreshData()}>Retry loading data</button></div>

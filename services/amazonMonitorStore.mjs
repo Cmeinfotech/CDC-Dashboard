@@ -90,16 +90,24 @@ export async function commitRun(run) {
   await atomicJson(path.join(root, 'runs', `${run.id}.summary.json`), { id: run.id, capturedAt: run.capturedAt, source: run.source, baseline: run.baseline, productCount: run.products.length, changeCount: run.changes?.length || 0, unavailableDetails: run.unavailableDetails || [] });
   await atomicJson(path.join(root, 'latest.json'), { id: run.id, capturedAt: run.capturedAt, runIds: [...(latest?.runIds || (latest ? [latest.id] : [])), run.id] });
 }
-export async function monitorState() {
+const pendingMonitorStates = new Map();
+export async function monitorState(options = {}) {
+  const key = options.includeHistory === false ? 'latest' : 'full';
+  let pending = pendingMonitorStates.get(key);
+  if (!pending) { pending = computeMonitorState(options); pendingMonitorStates.set(key,pending); pending.finally(()=>{if(pendingMonitorStates.get(key)===pending)pendingMonitorStates.delete(key);}).catch(()=>{}); }
+  return pending;
+}
+async function computeMonitorState({ includeHistory = true } = {}) {
   const root = monitorRoot();
   const [latest, progress, reviews, automation] = await Promise.all([readJson(path.join(root, 'latest.json')), readJson(path.join(root, 'progress.json')), readJson(path.join(root, 'reviews.json'), {}), readJson(path.join(root, 'automation.json'))]);
   const run = latest ? await readJson(path.join(root, 'runs', `${latest.id}.json`)) : null;
-  const ids = latest?.runIds || (latest ? [latest.id] : []);
-  const runs = await Promise.all(ids.map(async id => {
+  const ids = includeHistory ? latest?.runIds || (latest ? [latest.id] : []) : [];
+  const runs = [];
+  for (let offset = 0; offset < ids.length; offset += 4) runs.push(...await Promise.all(ids.slice(offset, offset + 4).map(async id => {
     const summary = await readJson(path.join(root, 'runs', `${id}.summary.json`));
     if (summary) return { ...summary, changes: await readJson(path.join(root, 'runs', `${id}.changes.json`), []) };
     return id === run?.id ? run : readJson(path.join(root, 'runs', `${id}.json`));
-  }));
+  })));
   const history = runs.filter(Boolean).sort((a, b) => b.capturedAt.localeCompare(a.capturedAt));
   const changes = history.flatMap(item => item.changes || []).map(change => ({ ...change, status: reviews[change.id]?.status || 'Unreviewed', reviewedAt: reviews[change.id]?.reviewedAt || null, linkedAt: reviews[change.id]?.linkedAt || null, activeMapping: reviews[change.id]?.activeMapping || null, audit: reviews[change.id]?.audit || [] }));
   // Keep Amazon snapshots immutable: local acceptance must never alter sync comparisons.
